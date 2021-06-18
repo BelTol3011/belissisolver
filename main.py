@@ -1,16 +1,24 @@
+import traceback
+
+
 def parse_util(term: str, split_char: str) -> list[str]:
+    if not term.startswith("("):
+        term = f"({term})"
+
     groups: list[str] = [""]
     level = 0
     for char in term:
-        if char == "(":
-            level += 1
-        elif char == ")":
+        if char == ")":
             level -= 1
-        elif char == split_char and level == 0:
+
+        if char == split_char and level == 1:
             groups.append("")
-        else:
+
+        elif level > 0:
             groups[-1] += char
 
+        if char == "(":
+            level += 1
     return groups
 
 
@@ -20,11 +28,16 @@ class MathElement:
 
     @classmethod
     def from_str(cls, term: str) -> "MathElement":
-        # find sums
-        factors = parse_util(term, "+")
+        term = term.lstrip().rstrip()
+        # print(f" - {term}")
 
-        if len(factors) == 1:
-            sums = parse_util(factors[0], "*")
+        # find sums
+        products = parse_util(term, "+")
+        # print(f" -p {products}")
+
+        if len(products) == 1:
+            sums = parse_util(products[0], "*")
+            # print(f" -s {sums}")
             if len(sums) == 1:
                 # this is a number
                 return Number(sums[0])
@@ -32,21 +45,27 @@ class MathElement:
             # this is a product
             return Product([MathElement.from_str(part_term) for part_term in sums])
         else:
-            return Sum([MathElement.from_str(part_term) for part_term in factors])
+            return Sum([MathElement.from_str(part_term) for part_term in products])
 
 
 class Number(MathElement):
     def __init__(self, value: str):
-        self.value = value.lstrip().rstrip()
+        self.value = value
 
     def evaluate(self, **variables: dict[str: float]) -> float:
         if self.value in variables:
             return variables[self.value]
         else:
-            return float(self.value)
+            try:
+                return float(self.value)
+            except ValueError:
+                ...
+            val = eval(self.value, variables)
+            print(f"Warning: used eval(): {self.value}")
+            return val
 
     def __str__(self):
-        return "$" + str(self.value)
+        return str(self.value)
 
 
 class Sum(MathElement):
@@ -78,6 +97,7 @@ class Product(MathElement):
 
 def main():
     while 1:
+        # 5 * 4 + -2 * (5 + 4)
         inp = input(" ~ ")
         try:
             math_expr = MathElement.from_str(inp)
@@ -88,8 +108,14 @@ def main():
         print(" = ", end="")
         try:
             print(math_expr.evaluate())
-        except ValueError as e:
+        except Exception as e:
             print(f"? ({e})")
+
+        try:
+            print(f" eval: {eval(inp)}")
+        except Exception:
+            ...
+        print()
 
 
 if __name__ == '__main__':
