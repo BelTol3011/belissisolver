@@ -1,2 +1,2 @@
 # primitve-math
-A primitve math parser and variable isolator
+A primitve math parser and (variable isolator not yet)
