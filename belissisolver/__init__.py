@@ -1,6 +1,7 @@
 import abc
 import random
 import string
+import time
 from collections import defaultdict
 from typing import Union
 
@@ -541,10 +542,14 @@ def main():
 
             print(f" = {expr}")
 
+            t1 = time.perf_counter()
             simple = expr.simplify()
+            dt = time.perf_counter() - t1
 
             if simple != expr:
                 print(f" = {simple}")
+
+            print(f" // simplification took {dt:.4f}s")
 
             evaluated = simple.eval()
 
@@ -554,6 +559,8 @@ def main():
             print(f" ≈ ? ({e})")
         except ParsingException as e:
             print(f" = ? ({e})")
+
+
 
 
 if __name__ == '__main__':
