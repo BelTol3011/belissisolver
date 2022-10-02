@@ -306,6 +306,7 @@ class SumOrProduct(CommutativeEqMixin, AbstractArgumentExpression, abc.ABC):
         #  hash(Product()) fails.
         return hash(tuple(self.args))
 
+
 class Sum(SumOrProduct):
     operator = "+"
     unit_element = Number(0)
