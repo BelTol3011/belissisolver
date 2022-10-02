@@ -345,7 +345,7 @@ class Quotient(AbstractArgumentExpression, QuotientsDifferencesMixin):
 
     @classmethod
     def from_args(cls, *args: Expression) -> Expression:
-        assert len(args) == 2
+        assert len(args) >= 2
 
         return Product(args[0], *[Power(arg, Number(-1)) for arg in args[1:]])
 
@@ -358,7 +358,7 @@ class Difference(AbstractArgumentExpression):
 
     @classmethod
     def from_args(cls, *args: Expression) -> Sum:
-        assert len(args) == 2
+        assert len(args) >= 2
 
         return Sum(args[0], *[Product(arg, Number(-1)) for arg in args[1:]])
 
