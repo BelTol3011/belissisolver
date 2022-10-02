@@ -1,4 +1,4 @@
 # belissisolver
 A very primitve CAS.
 
-![image](https://user-images.githubusercontent.com/37810842/193454345-9b7f338d-67ec-4727-bf99-96a7d632a9ba.png)
+![image](https://user-images.githubusercontent.com/37810842/193475727-7831a907-df0a-4a1c-9994-c62743c5ece3.png)
