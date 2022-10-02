@@ -336,7 +336,7 @@ class Sum(SumOrProduct):
             else:
                 args[arg].append(Number(1))
 
-        return Sum.from_args(*[Product.from_args(key, Sum.from_args(*value)) for key, value in args.items()])
+        return Sum(*[Product.from_args(key, Sum.from_args(*value)) for key, value in args.items()])
 
     def simplify(self) -> Expression:
         expr = super().simplify()
@@ -344,11 +344,7 @@ class Sum(SumOrProduct):
         if isinstance(expr, Sum):
             expr = expr.simplify_combine_factors()
 
-            if isinstance(expr, Sum):
-                # noinspection PySuperArguments
-                return super(Sum, expr).simplify()
-
-            return expr.simplify()
+            return super(Sum, expr).simplify()
 
         return expr
 
@@ -369,7 +365,7 @@ class Product(SumOrProduct):
             else:
                 args[arg].append(Number(1))
 
-        return Product.from_args(*[Power.from_args(key, Sum.from_args(*value)) for key, value in args.items()])
+        return Product(*[Power.from_args(key, Sum.from_args(*value)) for key, value in args.items()])
 
     def simplify(self) -> Expression:
         expr = super().simplify()
@@ -380,11 +376,7 @@ class Product(SumOrProduct):
 
             expr = expr.simplify_combine_powers()
 
-            if isinstance(expr, Product):
-                # noinspection PySuperArguments
-                return super(Product, expr).simplify()
-
-            return expr.simplify()
+            return super(Product, expr).simplify()
 
         return expr
 
@@ -522,7 +514,7 @@ def generate_random_expression(max_levels: 5) -> Expression:
         if random.random() > .5:
             return Number((random.random() * 100 - 50) // 1)
         else:
-            return Variable(random.choice("abc"))
+            return Variable(random.choice("x"))
 
     expr_type: type[AbstractArgumentExpression] = random.choice((Sum, Product, Power))
 
