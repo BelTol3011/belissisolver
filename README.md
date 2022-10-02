@@ -1,2 +1,2 @@
-# primitve-math
-A primitve math parser and (variable isolator not yet)
+# belissisolver
+A very primitve CAS.
