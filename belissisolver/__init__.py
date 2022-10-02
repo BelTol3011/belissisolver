@@ -1,6 +1,7 @@
 import abc
 import random
 import string
+from collections import defaultdict
 from typing import Union
 
 
@@ -311,6 +312,46 @@ class Sum(SumOrProduct):
     operator = "+"
     unit_element = Number(0)
 
+    def factor_out(self, expr: Expression):
+        # 2 a + 3 a + a + b
+        # a * (2 a / a + 3 a / a + a / a + b / a)
+        # a (2 + 3 + 1 + b / a)
+
+        sum_args = []
+
+        for arg in self.args:
+            sum_args.append(Quotient.from_args(arg, expr))
+
+        return Product(expr, Sum.from_args(*sum_args))
+
+    def simplify_combine_factors(self):
+        args: dict[Expression, list[Expression]] = defaultdict(list)
+
+        for arg in self.args:
+            if isinstance(arg, Product):
+                numbers = filter(lambda x: isinstance(x, Number), arg.args)
+                others = filter(lambda x: not isinstance(x, Number), arg.args)
+
+                args[Product.from_args(*others)].append(Product.from_args(*numbers))
+            else:
+                args[arg].append(Number(1))
+
+        return Sum.from_args(*[Product.from_args(key, Sum.from_args(*value)) for key, value in args.items()])
+
+    def simplify(self) -> Expression:
+        expr = super().simplify()
+
+        if isinstance(expr, Sum):
+            expr = expr.simplify_combine_factors()
+
+            if isinstance(expr, Sum):
+                # noinspection PySuperArguments
+                return super(Sum, expr).simplify()
+
+            return expr.simplify()
+
+        return expr
+
     def eval(self) -> float:
         return sum([arg.eval() for arg in self.args])
 
@@ -319,11 +360,33 @@ class Product(SumOrProduct):
     operator = "*"
     unit_element = Number(1)
 
-    def simplify(self) -> Expression:
-        if Number(0) in self.args:
-            return Number(0)
+    def simplify_combine_powers(self):
+        args: dict[Expression, list[Expression]] = defaultdict(list)
 
-        return super().simplify()
+        for arg in self.args:
+            if isinstance(arg, Power):
+                args[arg.base].append(arg.exponent)
+            else:
+                args[arg].append(Number(1))
+
+        return Product.from_args(*[Power.from_args(key, Sum.from_args(*value)) for key, value in args.items()])
+
+    def simplify(self) -> Expression:
+        expr = super().simplify()
+
+        if isinstance(expr, Product):
+            if Number(0) in expr.args:
+                return Number(0)  # TODO: Undefined things...
+
+            expr = expr.simplify_combine_powers()
+
+            if isinstance(expr, Product):
+                # noinspection PySuperArguments
+                return super(Product, expr).simplify()
+
+            return expr.simplify()
+
+        return expr
 
     def eval(self) -> float:
         product = 1
@@ -382,21 +445,30 @@ class Power(AbstractArgumentExpression):
                 f"A mathematical error occurred during the evaluation of the expression {self}."
             ) from e
 
+    @property
+    def base(self):
+        return self.args[0]
+
+    @property
+    def exponent(self):
+        return self.args[1]
+
     def simplify(self):
-        _self = super().simplify()
+        _self: Power = self.__class__(self.base.simplify(), self.exponent.simplify())
 
-        base, exponent = _self.args
+        if _self.exponent == Number(1):
+            return _self.base
 
-        if exponent == Number(1):
-            return base
-
-        if exponent == Number(0) and base != Number(0):
+        if _self.exponent == Number(0) and _self.base != Number(0):
             return Number(1)
 
-        if exponent == Number(0) and base == Number(0):
-            return Variable("UNDEFINED")  # TODO: Introduce undefined variables
+        if _self.exponent == Number(0) and _self.base == Number(0):
+            return Variable("UNDEFINED_EXPONENT_BASE_ZERO")  # TODO: Introduce undefined variables
 
-        return self
+        if isinstance(_self.exponent, Number) and _self.exponent.value < 0 and _self.base == Number(0):
+            return Variable("UNDEFINED_DIVISION_BY_ZERO")  # division by zero
+
+        return _self
 
 
 class Equality(CommutativeEqMixin, AbstractArgumentExpression):
