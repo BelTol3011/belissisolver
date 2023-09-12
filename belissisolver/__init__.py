@@ -118,6 +118,10 @@ class Expression(abc.ABC):
     def __hash__(self):
         ...
 
+    @property
+    def is_undefined(self):
+        return False
+
 
 class Variable(Expression):
     forbidden_chars = "^*+-/(). "
@@ -205,7 +209,11 @@ class AbstractArgumentExpression(Expression, abc.ABC):
         self.args = args
 
     def simplify(self):
-        return self.__class__(*[arg.simplify() for arg in self.args])
+        for arg in self.args:
+            if arg.is_undefined:
+                return arg
+        else:
+            return self.__class__(*[arg.simplify() for arg in self.args])
 
     def substitute(self, key: Expression, to: Expression):
         args = []
@@ -279,6 +287,11 @@ class SumOrProduct(CommutativeEqMixin, AbstractArgumentExpression, abc.ABC):
         return self.__class__(*args)
 
     def simplify(self) -> Expression:
+        _self = super().simplify()
+        if not isinstance(_self, self.__class__):
+            return _self
+        self = _self
+
         args = []
         constants = []
         numbers = []
@@ -362,18 +375,23 @@ class Product(SumOrProduct):
 
         for arg in self.args:
             if isinstance(arg, Power):
-                args[arg.base].append(arg.exponent)
+                base_args = arg.base
+                if isinstance(base_args, Product):
+                    for base_factor in base_args.args:
+                        args[base_factor].append(arg.exponent)
+                else:
+                    args[arg.base].append(arg.exponent)
             else:
                 args[arg].append(Number(1))
 
-        return Product(*[Power.from_args(key, Sum.from_args(*value)) for key, value in args.items()])
+        return Product(*[Power.from_args(key, Sum.from_args(*value)).simplify() for key, value in args.items()])
 
     def simplify(self) -> Expression:
         expr = super().simplify()
 
         if isinstance(expr, Product):
             if Number(0) in expr.args:
-                return Number(0)  # TODO: Undefined things...
+                return Number(0)
 
             expr = expr.simplify_combine_powers()
 
@@ -455,13 +473,15 @@ class Power(AbstractArgumentExpression):
         if _self.exponent == Number(0) and _self.base != Number(0):
             return Number(1)
 
-        if _self.exponent == Number(0) and _self.base == Number(0):
-            return Variable("UNDEFINED_EXPONENT_BASE_ZERO")  # TODO: Introduce undefined variables
-
-        if isinstance(_self.exponent, Number) and _self.exponent.value < 0 and _self.base == Number(0):
-            return Variable("UNDEFINED_DIVISION_BY_ZERO")  # division by zero
-
         return _self
+
+    @property
+    def is_undefined(self):
+        if self.exponent == Number(0) and self.base == Number(0):
+            return True
+
+        if isinstance(self.exponent, Number) and self.exponent.value < 0 and self.base == Number(0):
+            return True
 
 
 class Equality(CommutativeEqMixin, AbstractArgumentExpression):
@@ -549,6 +569,9 @@ def main():
             if simple != expr:
                 print(f" = {simple}")
 
+            if simple.is_undefined:
+                print(" // undefined")
+
             print(f" // simplification took {dt:.4f}s")
 
             evaluated = simple.eval()
@@ -559,8 +582,6 @@ def main():
             print(f" ≈ ? ({e})")
         except ParsingException as e:
             print(f" = ? ({e})")
-
-
 
 
 if __name__ == '__main__':
