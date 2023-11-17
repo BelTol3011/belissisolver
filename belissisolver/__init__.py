@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import abc
 import random
 import string
 import time
+import traceback
 import typing
 from collections import defaultdict
-from typing import Union
 
 
 def parens_aware_split(txt: str, split_char: str) -> list[str]:
@@ -193,17 +195,25 @@ class Boolean(Number):
         raise DirectParsingException(f"Can't parse {expr!r} as a boolean.")
 
 
+T2 = typing.TypeVar("T2", bound=Expression)
+
+
 class AbstractArgumentExpression(Expression, abc.ABC):
     operator: str
     max_args: int | None = None
+
+    is_commutative: bool
+    is_associative: bool
+    unit_element: Expression | None = None
 
     def __init__(self, *args: Expression):
         self.args = args
 
     @classmethod
-    def from_args(cls, *args: Expression) -> Expression:
+    def from_args(cls: typing.Type[T2], *args: Expression) -> T2:
         if len(args) == 1:
             return args[0]
+
         return cls(*args)
 
     @classmethod
@@ -225,78 +235,31 @@ class AbstractArgumentExpression(Expression, abc.ABC):
     def is_constant(self):
         return all(arg.is_constant for arg in self.args)
 
+    def __hash__(self):
+        return hash(tuple(self.args))
+
+    def __contains__(self, item):
+        return (item in self.args) or any(item in arg for arg in self.args)
+
     def __eq__(self, other):
         if not isinstance(other, self.__class__):
             return False
 
-        return self.args == other.args
-
-    def __hash__(self):
-        return hash(tuple(self.args))
-
-
-class CommutativeEqMixin:
-    def __eq__(self: AbstractArgumentExpression, other):
-        if not isinstance(other, self.__class__):
+        if len(self.args) != len(other.args):
             return False
 
-        return set(self.args) == set(other.args)
+        if self.is_commutative:
+            if set(self.args) == set(other.args):
+                return True
+        else:
+            return all((arg1 == arg2) for arg1, arg2 in zip(self.args, other.args))
 
 
-class SumOrProduct(CommutativeEqMixin, AbstractArgumentExpression, abc.ABC):
-    unit_element: Number
-
-    def simplify_associative(self) -> Union["Sum", "Product"]:
-        args = []
-
-        for arg in self.args:
-            if isinstance(arg, self.__class__):
-                args += arg.simplify_associative().args
-            else:
-                args.append(arg)
-
-        # noinspection PyTypeChecker
-        return self.__class__(*args)
-
-    def simplify(self) -> Expression:
-        _self = super().simplify()
-        if not isinstance(_self, self.__class__):
-            return _self
-        self = _self
-
-        args = []
-        constants = []
-        numbers = []
-
-        for arg in self.simplify_associative().args:
-            arg = arg.simplify()
-
-            if arg != self.unit_element:
-                try:
-                    numbers.append(arg.eval())
-                except ExpressionEvaluationException:
-                    if arg.is_constant:
-                        constants.append(arg)
-                    else:
-                        args.append(arg)
-
-        args += [self.from_args(*[Number(num) for num in numbers]).simplify_eval()] if numbers else []
-        args += constants
-
-        if len(args) == 0:
-            return self.unit_element
-
-        return self.from_args(*args)
-
-    def __hash__(self):
-        # TODO: WHY DO I NEED THIS? __hash__ is defined in AbstractArgumentExpression already, yet, without this,
-        #  hash(Product()) fails.
-        return hash(tuple(self.args))
-
-
-class Sum(SumOrProduct):
+class Sum(AbstractArgumentExpression):
     operator = "+"
     unit_element = Number(0)
+    is_commutative = True
+    is_associative = True
 
     def factor_out(self, expr: Expression):
         # 2 a + 3 a + a + b
@@ -314,9 +277,11 @@ class Sum(SumOrProduct):
         return sum([arg.eval() for arg in self.args])
 
 
-class Product(SumOrProduct):
+class Product(AbstractArgumentExpression):
     operator = "*"
     unit_element = Number(1)
+    is_commutative = True
+    is_associative = True
 
     def eval(self) -> float:
         product = 1
@@ -362,6 +327,8 @@ class Difference(AbstractArgumentExpression):
 class Power(AbstractArgumentExpression):
     operator = "^"
     max_args = 2
+    is_commutative = False
+    is_associative = False
 
     @classmethod
     def parse(cls, expr: str) -> "Expression":
@@ -388,23 +355,73 @@ class Power(AbstractArgumentExpression):
         if self.exponent == Number(0) and self.base == Number(0):
             return True
 
+        # noinspection PyUnresolvedReferences
         if isinstance(self.exponent, Number) and self.exponent.value < 0 and self.base == Number(0):
             return True
 
 
-class Equality(CommutativeEqMixin, AbstractArgumentExpression):
+class Equality(AbstractArgumentExpression):
     operator = "="
     max_args = 3
+    is_commutative = True
+    is_associative = False
 
     def eval(self) -> float:
         return self.args[0].eval() == self.args[1].eval()
 
 
-def simplify(expr: Expression, eval: bool = False) -> Expression:
+T = typing.TypeVar("T", bound=Expression)
+
+
+def simplify_associative(expr: T) -> T:
+    if not isinstance(expr, AbstractArgumentExpression) or not expr.is_associative:
+        return expr
+
+    args = []
+
+    for arg in expr.args:
+        if isinstance(arg, expr.__class__):
+            args += simplify_associative(arg).args
+        else:
+            args.append(arg)
+
+    return expr.__class__(*args)
+
+
+def simplify_commutative(expr: T) -> T:
+    if not isinstance(expr, AbstractArgumentExpression) or not expr.is_commutative:
+        return expr
+
+    args: list[Expression] = []
+    constants = []
+    numbers = []
+
+    assert expr.unit_element is not None
+
+    for arg in expr.args:
+        if arg != expr.unit_element:
+            if isinstance(arg, Number):
+                numbers.append(arg)
+            elif arg.is_constant:
+                constants.append(arg)
+            else:
+                args.append(arg)
+
+    args += [simplify(expr.from_args(*(num for num in numbers)))] if numbers else []
+    args += constants
+
+    if len(args) == 0:
+        expr = expr.unit_element
+    else:
+        expr = expr.from_args(*args)
+
+    return expr
+
+
+def simplify_no_recurse(expr: T) -> T:
     if isinstance(expr, Number):
         return expr
 
-    print(f"Simplifying: {expr.to_str()}")
     if isinstance(expr, AbstractArgumentExpression):
         for arg in expr.args:
             if arg.is_undefined:
@@ -412,11 +429,20 @@ def simplify(expr: Expression, eval: bool = False) -> Expression:
         else:
             expr = expr.__class__.from_args(*[simplify(arg) for arg in expr.args])
 
-    if eval:
-        try:
-            return Number(expr.eval())
-        except ExpressionEvaluationException:
-            pass
+        if all(arg.is_constant for arg in expr.args):
+            try:
+                return Number(expr.eval())
+            except ExpressionEvaluationException:
+                pass
+
+        expr = simplify_associative(expr)
+        expr = simplify_commutative(expr)
+
+    return expr
+
+
+def simplify(expr: Expression) -> Expression:
+    expr = simplify_no_recurse(expr)
 
     if isinstance(expr, Sum):
         # combine factors
@@ -428,17 +454,23 @@ def simplify(expr: Expression, eval: bool = False) -> Expression:
                 others = filter(lambda x: not isinstance(x, Number), arg.args)
 
                 args[Product.from_args(*others)].append(Product.from_args(*numbers))
-            elif arg == Number(0):
-                pass
             else:
                 args[arg].append(Number(1))
 
-        return Sum.from_args(*(simplify(Product.from_args(key, Sum.from_args(*value))) for key, value in args.items()))
+        return simplify_no_recurse(
+            Sum.from_args(*(
+                simplify(Product.from_args(key, Sum.from_args(*value))) for key, value in args.items()
+            ))
+        )
 
     elif isinstance(expr, Product):
+        # combine powers
         args: dict[Expression, list[Expression]] = defaultdict(list)
 
         for arg in expr.args:
+            if arg == Number(0):
+                return Number(0)
+
             if isinstance(arg, Power):
                 base_args = arg.base
                 if isinstance(base_args, Product):
@@ -446,38 +478,27 @@ def simplify(expr: Expression, eval: bool = False) -> Expression:
                         args[base_factor].append(arg.exponent)
                 else:
                     args[arg.base].append(arg.exponent)
-            elif arg == Number(1):
-                pass
             else:
                 args[arg].append(Number(1))
 
-        return Product.from_args(
-            *(simplify(Power.from_args(key, Sum.from_args(*value))) for key, value in args.items()))
+        return simplify_no_recurse(
+            Product.from_args(*(
+                simplify(Power.from_args(key, Sum.from_args(*value))) for key, value in args.items()
+            ))
+        )
 
     elif isinstance(expr, Power):
         if isinstance(expr.base, Power):
             return simplify(Power.from_args(expr.base.base, Product.from_args(expr.base.exponent, expr.exponent)))
+
+        if expr.base == Number(0):
+            return Number(0)
 
         if expr.exponent == Number(1):
             return expr.base
 
         if expr.exponent == Number(0) and expr.base != Number(0):
             return Number(1)
-
-        return expr
-
-    elif isinstance(expr, Equality):
-        if expr.args[0] == expr.args[1]:
-            return Boolean(True)
-
-        try:
-            lhs = expr.args[0].eval()
-            rhs = expr.args[1].eval()
-        except ExpressionEvaluationException:
-            pass
-        else:
-            if lhs == rhs:
-                return Boolean(True)
 
         return expr
 
