@@ -213,6 +213,8 @@ class AbstractArgumentExpression(Expression, abc.ABC):
         if len(args) == 1:
             return args[0]
 
+        assert len(args) != 0
+
         return cls(*args)
 
     @classmethod
@@ -233,6 +235,9 @@ class AbstractArgumentExpression(Expression, abc.ABC):
     @property
     def is_constant(self):
         return all(arg.is_constant for arg in self.args)
+
+    def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
+        raise NotImplementedError(f"Unknown partial derivative with respect to {i + 1}. argument of {self.to_str()}.")
 
     def __hash__(self):
         return hash(tuple(self.args))
@@ -275,6 +280,9 @@ class Sum(AbstractArgumentExpression):
     def eval(self) -> float:
         return sum([arg.eval() for arg in self.args])
 
+    def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
+        return Number(1)
+
 
 class Product(AbstractArgumentExpression):
     operator = "*"
@@ -287,6 +295,9 @@ class Product(AbstractArgumentExpression):
         for arg in self.args:
             product *= arg.eval()
         return product
+
+    def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
+        return Product.from_args(*(arg for j, arg in enumerate(self.args) if j != i))
 
 
 class QuotientsDifferencesMixin:
@@ -357,6 +368,15 @@ class Power(AbstractArgumentExpression):
         # noinspection PyUnresolvedReferences
         if isinstance(self.exponent, Number) and self.exponent.value < 0 and self.base == Number(0):
             return True
+
+    def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
+        if i == 0:
+            return Product.from_args(
+                self.exponent,
+                Power.from_args(var, Difference.from_args(self.exponent, Number(1)))
+            )
+        else:
+            return Variable("__hack_you_shouldn't_see_this")
 
 
 class Equality(AbstractArgumentExpression):
@@ -514,22 +534,20 @@ def differentiate(expr: Expression, var: Variable) -> Expression:
         else:
             return Number(0)
 
-    elif isinstance(expr, Sum):
-        return Sum.from_args(*(differentiate(arg, var) for arg in expr.args))
+    if isinstance(expr, AbstractArgumentExpression):
+        # see https://en.wikipedia.org/wiki/Chain_rule#Case_of_scalar-valued_functions_with_multiple_inputs
 
-    elif isinstance(expr, Product):
-        factors = expr.args
-        diff_factors = [differentiate(factor, var) for factor in factors]
+        args = []
 
-        return Sum.from_args(*(
-            Product.from_args(diff_factors[i], *factors[:i], *factors[i + 1:])
-            for i in range(len(factors))
-        ))
+        for i, arg in enumerate(expr.args):
+            args.append(
+                Product.from_args(
+                    differentiate(arg, var),
+                    expr.par_diff(i, arg)
+                )
+            )
 
-    elif isinstance(expr, Power):
-        if expr.base == var:
-            return Product.from_args(expr.exponent,
-                                     Power.from_args(var, Difference.from_args(expr.exponent, Number(1))))
+        return Sum.from_args(*args)
 
     raise NotImplementedError(f"Can't differentiate {expr} with respect to {var}.")
 
@@ -633,10 +651,11 @@ def main():
 
         try:
             t2 = time.perf_counter()
-            diff = simplify(differentiate(simple, Variable("x")))
+            diff = differentiate(simple, Variable("x"))
             dt2 = time.perf_counter() - t2
 
             print(f"f'(x) = {diff}")
+            print(f"f'(x) = {simplify(diff)}")
             print(f"// differentiation took {dt2:.4f}s")
         except NotImplementedError as e:
             print(f"f'(x) = ? ({e})")
