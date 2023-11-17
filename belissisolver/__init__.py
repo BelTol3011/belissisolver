@@ -4,7 +4,6 @@ import abc
 import random
 import string
 import time
-import traceback
 import typing
 from collections import defaultdict
 
@@ -505,6 +504,36 @@ def simplify(expr: Expression) -> Expression:
     return expr
 
 
+def differentiate(expr: Expression, var: Variable) -> Expression:
+    if expr.is_constant:
+        return Number(0)
+
+    if isinstance(expr, Variable):
+        if expr == var:
+            return Number(1)
+        else:
+            return Number(0)
+
+    elif isinstance(expr, Sum):
+        return Sum.from_args(*(differentiate(arg, var) for arg in expr.args))
+
+    elif isinstance(expr, Product):
+        factors = expr.args
+        diff_factors = [differentiate(factor, var) for factor in factors]
+
+        return Sum.from_args(*(
+            Product.from_args(diff_factors[i], *factors[:i], *factors[i + 1:])
+            for i in range(len(factors))
+        ))
+
+    elif isinstance(expr, Power):
+        if expr.base == var:
+            return Product.from_args(expr.exponent,
+                                     Power.from_args(var, Difference.from_args(expr.exponent, Number(1))))
+
+    raise NotImplementedError(f"Can't differentiate {expr} with respect to {var}.")
+
+
 def substitute(expr: Expression, key: Expression, to: Expression):
     if isinstance(expr, AbstractArgumentExpression):
         args = []
@@ -566,7 +595,7 @@ def generate_random_expression(max_levels: 5) -> Expression:
 
 def main():
     while 1:
-        txt = input(" ~ ")
+        txt = input("f(x) = ")
 
         # (((hl * (i ^ -1)) + (-1 * 98t)) + ((S * (O * (Ft ^ -1))) + (-1 * (h * (QB ^ -1)))))
         # (A + ((((EMOH ^ 1.0) * (RC ^ -1)) * d) + (-1 * 6.0) + (-1 * lD) + (-1 * d)))
@@ -577,28 +606,39 @@ def main():
             else:
                 expr = Expression.from_str(txt)
 
-            print(f" = {expr}")
+            print(f"f(x) = {expr}")
 
             t1 = time.perf_counter()
             simple = simplify(expr)
             dt = time.perf_counter() - t1
 
             if simple != expr:
-                print(f" = {simple}")
+                print(f"f(x) = {simple}")
 
             if simple.is_undefined:
-                print(" // undefined")
+                print("// undefined")
 
-            print(f" // simplification took {dt:.4f}s")
+            print(f"// simplification took {dt:.4f}s")
 
             evaluated = simple.eval()
 
             if Number(evaluated) != simple:
-                print(f" ≈ {evaluated}")
+                print(f"f(x) ≈ {evaluated}")
         except ExpressionEvaluationException as e:
-            print(f" ≈ ? ({e})")
+            print(f"f(x) ≈ ? ({e})")
         except ParsingException as e:
-            print(f" = ? ({e})")
+            print(f"f(x) = ? ({e})")
+        else:
+            try:
+                t2 = time.perf_counter()
+                diff = simplify(differentiate(simple, Variable("x")))
+                dt2 = time.perf_counter() - t2
+
+                print(f"f'(x) = {diff}")
+                print(f"// Differentiation took {dt2:.4f}s")
+            except NotImplementedError as e:
+                print(f"f'(x) = ? ({e})")
+        print()
 
 
 if __name__ == '__main__':
