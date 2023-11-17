@@ -490,8 +490,8 @@ def simplify(expr: Expression) -> Expression:
         if isinstance(expr.base, Power):
             return simplify(Power.from_args(expr.base.base, Product.from_args(expr.base.exponent, expr.exponent)))
 
-        if expr.base == Number(0):
-            return Number(0)
+        # if expr.base == Number(0):
+        #     return Number(0)
 
         if expr.exponent == Number(1):
             return expr.base
@@ -605,39 +605,41 @@ def main():
                 expr = generate_random_expression(4)
             else:
                 expr = Expression.from_str(txt)
+        except ParsingException as e:
+            print(f"f(x) = ? ({e})")
+            continue
 
-            print(f"f(x) = {expr}")
+        print(f"f(x) = {expr}")
 
-            t1 = time.perf_counter()
-            simple = simplify(expr)
-            dt = time.perf_counter() - t1
+        t1 = time.perf_counter()
+        simple = simplify(expr)
+        dt = time.perf_counter() - t1
 
-            if simple != expr:
-                print(f"f(x) = {simple}")
+        if simple != expr:
+            print(f"f(x) = {simple}")
 
-            if simple.is_undefined:
-                print("// undefined")
+        if simple.is_undefined:
+            print("// undefined")
 
-            print(f"// simplification took {dt:.4f}s")
+        print(f"// simplification took {dt:.4f}s")
 
+        try:
             evaluated = simple.eval()
 
             if Number(evaluated) != simple:
                 print(f"f(x) ≈ {evaluated}")
         except ExpressionEvaluationException as e:
             print(f"f(x) ≈ ? ({e})")
-        except ParsingException as e:
-            print(f"f(x) = ? ({e})")
-        else:
-            try:
-                t2 = time.perf_counter()
-                diff = simplify(differentiate(simple, Variable("x")))
-                dt2 = time.perf_counter() - t2
 
-                print(f"f'(x) = {diff}")
-                print(f"// Differentiation took {dt2:.4f}s")
-            except NotImplementedError as e:
-                print(f"f'(x) = ? ({e})")
+        try:
+            t2 = time.perf_counter()
+            diff = simplify(differentiate(simple, Variable("x")))
+            dt2 = time.perf_counter() - t2
+
+            print(f"f'(x) = {diff}")
+            print(f"// differentiation took {dt2:.4f}s")
+        except NotImplementedError as e:
+            print(f"f'(x) = ? ({e})")
         print()
 
 
