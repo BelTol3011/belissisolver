@@ -2,6 +2,7 @@ import abc
 import random
 import string
 import time
+import typing
 from collections import defaultdict
 from typing import Union
 
@@ -68,15 +69,6 @@ class Expression(abc.ABC):
 
     def to_pretty_str(self) -> list[str]:
         return [self.to_str()]
-
-    def simplify_eval(self) -> "Expression":
-        try:
-            return Number(self.eval())
-        except ExpressionEvaluationException:
-            return self
-
-    def simplify(self):
-        return self
 
     @abc.abstractmethod
     def eval(self) -> float:
@@ -208,26 +200,6 @@ class AbstractArgumentExpression(Expression, abc.ABC):
     def __init__(self, *args: Expression):
         self.args = args
 
-    def simplify(self):
-        for arg in self.args:
-            if arg.is_undefined:
-                return arg
-        else:
-            return self.__class__(*[arg.simplify() for arg in self.args])
-
-    def substitute(self, key: Expression, to: Expression):
-        args = []
-
-        for arg in self.args:
-            if arg == key:
-                args.append(to)
-            elif isinstance(arg, AbstractArgumentExpression):
-                args.append(arg.substitute(key, to))
-            else:
-                args.append(arg)
-
-        return self.from_args(*args)
-
     @classmethod
     def from_args(cls, *args: Expression) -> Expression:
         if len(args) == 1:
@@ -338,30 +310,6 @@ class Sum(SumOrProduct):
 
         return Product(expr, Sum.from_args(*sum_args))
 
-    def simplify_combine_factors(self):
-        args: dict[Expression, list[Expression]] = defaultdict(list)
-
-        for arg in self.args:
-            if isinstance(arg, Product):
-                numbers = filter(lambda x: isinstance(x, Number), arg.args)
-                others = filter(lambda x: not isinstance(x, Number), arg.args)
-
-                args[Product.from_args(*others)].append(Product.from_args(*numbers))
-            else:
-                args[arg].append(Number(1))
-
-        return Sum(*[Product.from_args(key, Sum.from_args(*value)) for key, value in args.items()])
-
-    def simplify(self) -> Expression:
-        expr = super().simplify()
-
-        if isinstance(expr, Sum):
-            expr = expr.simplify_combine_factors()
-
-            return super(Sum, expr).simplify()
-
-        return expr
-
     def eval(self) -> float:
         return sum([arg.eval() for arg in self.args])
 
@@ -369,35 +317,6 @@ class Sum(SumOrProduct):
 class Product(SumOrProduct):
     operator = "*"
     unit_element = Number(1)
-
-    def simplify_combine_powers(self):
-        args: dict[Expression, list[Expression]] = defaultdict(list)
-
-        for arg in self.args:
-            if isinstance(arg, Power):
-                base_args = arg.base
-                if isinstance(base_args, Product):
-                    for base_factor in base_args.args:
-                        args[base_factor].append(arg.exponent)
-                else:
-                    args[arg.base].append(arg.exponent)
-            else:
-                args[arg].append(Number(1))
-
-        return Product(*[Power.from_args(key, Sum.from_args(*value)).simplify() for key, value in args.items()])
-
-    def simplify(self) -> Expression:
-        expr = super().simplify()
-
-        if isinstance(expr, Product):
-            if Number(0) in expr.args:
-                return Number(0)
-
-            expr = expr.simplify_combine_powers()
-
-            return super(Product, expr).simplify()
-
-        return expr
 
     def eval(self) -> float:
         product = 1
@@ -464,17 +383,6 @@ class Power(AbstractArgumentExpression):
     def exponent(self):
         return self.args[1]
 
-    def simplify(self):
-        _self: Power = self.__class__(self.base.simplify(), self.exponent.simplify())
-
-        if _self.exponent == Number(1):
-            return _self.base
-
-        if _self.exponent == Number(0) and _self.base != Number(0):
-            return Number(1)
-
-        return _self
-
     @property
     def is_undefined(self):
         if self.exponent == Number(0) and self.base == Number(0):
@@ -486,21 +394,109 @@ class Power(AbstractArgumentExpression):
 
 class Equality(CommutativeEqMixin, AbstractArgumentExpression):
     operator = "="
-    max_args = 2
+    max_args = 3
 
-    def simplify(self):
-        expr = super().simplify()
+    def eval(self) -> float:
+        return self.args[0].eval() == self.args[1].eval()
 
-        if expr.eval():
-            return Boolean(True)
+
+def simplify(expr: Expression, eval: bool = False) -> Expression:
+    if isinstance(expr, Number):
+        return expr
+
+    print(f"Simplifying: {expr.to_str()}")
+    if isinstance(expr, AbstractArgumentExpression):
+        for arg in expr.args:
+            if arg.is_undefined:
+                return arg
+        else:
+            expr = expr.__class__.from_args(*[simplify(arg) for arg in expr.args])
+
+    if eval:
+        try:
+            return Number(expr.eval())
+        except ExpressionEvaluationException:
+            pass
+
+    if isinstance(expr, Sum):
+        # combine factors
+        args: dict[Expression, list[Expression]] = defaultdict(list)
+
+        for arg in expr.args:
+            if isinstance(arg, Product):
+                numbers = filter(lambda x: isinstance(x, Number), arg.args)
+                others = filter(lambda x: not isinstance(x, Number), arg.args)
+
+                args[Product.from_args(*others)].append(Product.from_args(*numbers))
+            elif arg == Number(0):
+                pass
+            else:
+                args[arg].append(Number(1))
+
+        return Sum.from_args(*(simplify(Product.from_args(key, Sum.from_args(*value))) for key, value in args.items()))
+
+    elif isinstance(expr, Product):
+        args: dict[Expression, list[Expression]] = defaultdict(list)
+
+        for arg in expr.args:
+            if isinstance(arg, Power):
+                base_args = arg.base
+                if isinstance(base_args, Product):
+                    for base_factor in base_args.args:
+                        args[base_factor].append(arg.exponent)
+                else:
+                    args[arg.base].append(arg.exponent)
+            elif arg == Number(1):
+                pass
+            else:
+                args[arg].append(Number(1))
+
+        return Product.from_args(
+            *(simplify(Power.from_args(key, Sum.from_args(*value))) for key, value in args.items()))
+
+    elif isinstance(expr, Power):
+        if isinstance(expr.base, Power):
+            return simplify(Power.from_args(expr.base.base, Product.from_args(expr.base.exponent, expr.exponent)))
+
+        if expr.exponent == Number(1):
+            return expr.base
+
+        if expr.exponent == Number(0) and expr.base != Number(0):
+            return Number(1)
 
         return expr
 
-    def eval(self) -> float:
-        if self.args[0] == self.args[1]:
-            return True
+    elif isinstance(expr, Equality):
+        if expr.args[0] == expr.args[1]:
+            return Boolean(True)
 
-        return self.args[0].eval() == self.args[1].eval()
+        try:
+            lhs = expr.args[0].eval()
+            rhs = expr.args[1].eval()
+        except ExpressionEvaluationException:
+            pass
+        else:
+            if lhs == rhs:
+                return Boolean(True)
+
+        return expr
+
+    return expr
+
+
+def substitute(expr: Expression, key: Expression, to: Expression):
+    if isinstance(expr, AbstractArgumentExpression):
+        args = []
+
+        for arg in expr.args:
+            if arg == key:
+                args.append(to)
+            elif isinstance(arg, AbstractArgumentExpression):
+                args.append(substitute(arg, key, to))
+            else:
+                args.append(arg)
+
+        return expr.from_args(*args)
 
 
 def gen_fuzz(length=20):
@@ -563,7 +559,7 @@ def main():
             print(f" = {expr}")
 
             t1 = time.perf_counter()
-            simple = expr.simplify()
+            simple = simplify(expr)
             dt = time.perf_counter() - t1
 
             if simple != expr:
