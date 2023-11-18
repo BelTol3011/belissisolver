@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import abc
+import functools
+import math
 import random
 import string
 import time
@@ -85,7 +87,7 @@ class Expression(abc.ABC):
         expr = remove_top_level_parens(expr)
 
         errors = []
-        for expr_type in Equality, Sum, Difference, Product, Quotient, Power, Number, Boolean, Variable:
+        for expr_type in LogicalOr, Equality, Sum, Difference, Product, Quotient, Power, Number, Boolean, Variable:
             try:
                 return expr_type.parse(expr)
             except (DirectParsingException, ParsingException) as e:
@@ -120,16 +122,16 @@ class Variable(Expression):
     forbidden_chars = "^*+-/(). "
 
     def __init__(self, symbol: str):
-        if any([char in self.forbidden_chars for char in symbol]):
-            raise ParsingException(f"Symbol contains invalid chars: {symbol!r}.")
-
-        if not symbol:
-            raise ParsingException("Can't create an empty Symbol.")
-
         self.symbol = symbol
 
     @classmethod
     def parse(cls, expr: str) -> "Expression":
+        if any([char in cls.forbidden_chars for char in expr]):
+            raise ParsingException(f"Symbol contains invalid chars: {expr!r}.")
+
+        if not expr:
+            raise ParsingException("Can't create an empty Symbol.")
+
         return Variable(expr)
 
     def eval(self) -> float:
@@ -141,6 +143,9 @@ class Variable(Expression):
     @property
     def is_constant(self):
         return False
+
+    def __contains__(self, item):
+        return self == item
 
     def __eq__(self, other):
         if not isinstance(other, Variable):
@@ -173,6 +178,9 @@ class Number(Expression):
     def is_constant(self):
         return True
 
+    def __contains__(self, item):
+        return self == item
+
     def __eq__(self, other):
         if not isinstance(other, Number):
             return False
@@ -181,6 +189,19 @@ class Number(Expression):
 
     def __hash__(self):
         return hash(self.value)
+
+
+class Constant(Number):
+    def __init__(self, symbol: str, value: float):
+        super().__init__(value)
+        self.symbol = symbol
+
+    def to_str(self) -> str:
+        return self.symbol
+
+
+Constant.pi = Constant("π", 3.141592653589793)
+Constant.e = Constant("𝑒", 2.718281828459045)
 
 
 class Boolean(Number):
@@ -376,7 +397,52 @@ class Power(AbstractArgumentExpression):
                 Power.from_args(var, Difference.from_args(self.exponent, Number(1)))
             )
         else:
-            return Variable("__hack_you_shouldn't_see_this")
+            return Product.from_args(
+                self,
+                Logarithm.from_args(Constant.e, self.base)
+            )
+
+
+class Logarithm(AbstractArgumentExpression):
+    is_commutative = False
+    is_associative = False
+
+    def eval(self) -> float:
+        try:
+            return math.log(self.base.eval(), self.exponent.eval())
+        except (ArithmeticError, ValueError) as e:
+            raise ExpressionEvaluationException(
+                f"A mathematical error occurred during the evaluation of the expression {self}."
+            ) from e
+
+    @property
+    def base(self):
+        return self.args[0]
+
+    @property
+    def exponent(self):
+        return self.args[1]
+
+    @property
+    def is_undefined(self):
+        if self.exponent == Number(0) and self.base == Number(0):
+            return True
+
+        # noinspection PyUnresolvedReferences
+        if isinstance(self.exponent, Number) and self.exponent.value < 0 and self.base == Number(0):
+            return True
+
+    def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
+        if i == 0:
+            return Product.from_args(
+                self.exponent,
+                Power.from_args(var, Difference.from_args(self.exponent, Number(1)))
+            )
+        else:
+            return super().par_diff(i, var)
+
+    def to_str(self) -> str:
+        return f"log({self.base.to_str()}, {self.exponent.to_str()})"
 
 
 class Equality(AbstractArgumentExpression):
@@ -384,9 +450,18 @@ class Equality(AbstractArgumentExpression):
     max_args = 3
     is_commutative = True
     is_associative = False
+    unit_element = Boolean(True)
 
     def eval(self) -> float:
         return self.args[0].eval() == self.args[1].eval()
+
+    @property
+    def lhs(self):
+        return self.args[0]
+
+    @property
+    def rhs(self):
+        return self.args[1]
 
 
 T = typing.TypeVar("T", bound=Expression)
@@ -437,7 +512,7 @@ def simplify_commutative(expr: T) -> T:
     return expr
 
 
-def simplify_no_recurse(expr: T) -> T:
+def simplify_abstract_arg_expr(expr: T) -> T:
     if isinstance(expr, Number):
         return expr
 
@@ -445,8 +520,8 @@ def simplify_no_recurse(expr: T) -> T:
         for arg in expr.args:
             if arg.is_undefined:
                 return arg
-        else:
-            expr = expr.__class__.from_args(*[simplify(arg) for arg in expr.args])
+
+        expr = expr.__class__.from_args(*[simplify(arg) for arg in expr.args])
 
         if all(arg.is_constant for arg in expr.args):
             try:
@@ -460,8 +535,9 @@ def simplify_no_recurse(expr: T) -> T:
     return expr
 
 
+@functools.cache
 def simplify(expr: Expression) -> Expression:
-    expr = simplify_no_recurse(expr)
+    expr = simplify_abstract_arg_expr(expr)
 
     if isinstance(expr, Sum):
         # combine factors
@@ -469,14 +545,19 @@ def simplify(expr: Expression) -> Expression:
 
         for arg in expr.args:
             if isinstance(arg, Product):
-                numbers = filter(lambda x: isinstance(x, Number), arg.args)
-                others = filter(lambda x: not isinstance(x, Number), arg.args)
+                numbers = list(filter(lambda x: isinstance(x, Number), arg.args))
+                others = list(filter(lambda x: not isinstance(x, Number), arg.args))
+
+                if not numbers:
+                    numbers = [Number(1)]
+                if not others:
+                    others = [Number(1)]
 
                 args[Product.from_args(*others)].append(Product.from_args(*numbers))
             else:
                 args[arg].append(Number(1))
 
-        return simplify_no_recurse(
+        return simplify_abstract_arg_expr(
             Sum.from_args(*(
                 simplify(Product.from_args(key, Sum.from_args(*value))) for key, value in args.items()
             ))
@@ -500,7 +581,7 @@ def simplify(expr: Expression) -> Expression:
             else:
                 args[arg].append(Number(1))
 
-        return simplify_no_recurse(
+        return simplify_abstract_arg_expr(
             Product.from_args(*(
                 simplify(Power.from_args(key, Sum.from_args(*value))) for key, value in args.items()
             ))
@@ -520,6 +601,10 @@ def simplify(expr: Expression) -> Expression:
             return Number(1)
 
         return expr
+
+    elif isinstance(expr, Equality):
+        if expr.lhs == expr.rhs:
+            return Boolean(True)
 
     return expr
 
@@ -565,6 +650,107 @@ def substitute(expr: Expression, key: Expression, to: Expression):
                 args.append(arg)
 
         return expr.from_args(*args)
+
+    return expr
+
+
+class LogicalOr(AbstractArgumentExpression):
+    operator = "∨"
+    is_commutative = True
+    is_associative = True
+    unit_element = Boolean(False)
+
+    def eval(self) -> float:
+        return any(arg.eval() for arg in self.args)
+
+
+def reduce(expr: Expression, variable: Variable, depth: int = 20) -> Expression | None:
+    expr = simplify(expr)
+
+    if isinstance(expr, Equality):
+        if isinstance(expr.rhs, AbstractArgumentExpression):
+            if variable in expr.rhs:
+                new_eq = simplify(expr.from_args(Difference.from_args(expr.lhs, expr.rhs), Number(0)))
+                return reduce(new_eq, variable)
+
+        if expr.lhs == variable:
+            return expr
+
+        if isinstance(expr.lhs, Sum):
+            subtract = []
+
+            # noinspection PyUnresolvedReferences
+            for arg in expr.lhs.args:
+                if variable not in arg:
+                    subtract.append(arg)
+
+            if not subtract:
+                raise NotImplementedError(f"Can't reduce expression {expr} to {variable}. (SUM)")
+
+            new_eq = expr.from_args(
+                Difference.from_args(expr.lhs, Sum.from_args(*subtract)),
+                Difference.from_args(expr.rhs, Sum.from_args(*subtract))
+            )
+
+            return reduce(new_eq, variable)
+
+        elif isinstance(expr.lhs, Product):
+            if expr.rhs == Number(0):
+                # noinspection PyUnresolvedReferences
+                return simplify(LogicalOr.from_args(*(
+                    reduce(Equality(arg, Number(0)), variable) for arg in expr.lhs.args
+                )))
+            else:
+                divide = []
+
+                # noinspection PyUnresolvedReferences
+                for arg in expr.lhs.args:
+                    if variable not in arg:
+                        divide.append(arg)
+
+                if not divide:
+                    raise NotImplementedError(f"Can't reduce expression {expr} to {variable}. (PRODUCT)")
+
+                new_eq = expr.from_args(
+                    Quotient.from_args(expr.lhs, Product.from_args(*divide)),
+                    Quotient.from_args(expr.rhs, Product.from_args(*divide))
+                )
+
+                return reduce(new_eq, variable)
+
+        elif isinstance(expr.lhs, Power):
+            # noinspection PyUnresolvedReferences
+            if variable in expr.lhs.base and variable not in expr.lhs.exponent:
+                # noinspection PyUnresolvedReferences
+                new_eq = expr.from_args(
+                    Power.from_args(expr.lhs, Quotient.from_args(Number(1), expr.lhs.exponent)),
+                    Power.from_args(expr.rhs, Quotient.from_args(Number(1), expr.lhs.exponent)),
+                )
+                # reduce(ThereExists.from_args(Variable("n"), ElementOf.from_args(Variable("n"), NaturalNumbers(),
+                # Equality.from_args(expr.lhs.exponent, Product.from_args(Number(2), expr.lhs.exponent)))),
+                # Variable("n"))
+                # TODO: Query if exponent is even
+
+                if isinstance(expr.lhs.exponent, Number):
+                    if expr.lhs.exponent.value % 2 == 0:
+                        new_eq = LogicalOr.from_args(
+                            new_eq,
+                            Equality.from_args(new_eq.lhs, Product.from_args(Number(-1), new_eq.rhs))
+                        )
+
+                return reduce(new_eq, variable)
+
+            # TODO Log on both sides
+
+    elif isinstance(expr, LogicalOr):
+        return simplify(LogicalOr.from_args(*(
+            reduce(arg, variable) for arg in expr.args
+        )))
+
+    elif isinstance(expr, Number):
+        return expr
+
+    raise NotImplementedError(f"Can't reduce expression {expr} to {variable}.")
 
 
 def gen_fuzz(length=20):
@@ -649,16 +835,65 @@ def main():
         except ExpressionEvaluationException as e:
             print(f"f(x) ≈ ? ({e})")
 
+        fx1 = simplify(substitute(simple, Variable("x"), Number(1)))
+
+        print(f"f(1) = {fx1}")
+
+        try:
+            fx1e = fx1.eval()
+
+            print(f"f(1) ≈ {fx1e}")
+        except ExpressionEvaluationException as e:
+            print(f"f(1) ≈ ? ({e})")
+
+        try:
+            t4 = time.perf_counter()
+            red = reduce(Equality(Variable("f(x)"), simple), Variable("x"))
+            dt4 = time.perf_counter() - t4
+
+            print(f" => {red}")
+            print(f"// reduction of f took {dt4:.4f}s")
+        except NotImplementedError as e:
+            print(f" => ? ({e})")
+
+        try:
+            t4 = time.perf_counter()
+            red = reduce(Equality(Number(0), simple), Variable("x"))
+            dt4 = time.perf_counter() - t4
+
+            print(f" => f(x)=0 <=> {red}")
+            print(f"// reduction of f(x)=0 took {dt4:.4f}s")
+        except NotImplementedError as e:
+            print(f" => ? ({e})")
+
         try:
             t2 = time.perf_counter()
             diff = differentiate(simple, Variable("x"))
             dt2 = time.perf_counter() - t2
 
             print(f"f'(x) = {diff}")
-            print(f"f'(x) = {simplify(diff)}")
             print(f"// differentiation took {dt2:.4f}s")
+
+            t3 = time.perf_counter()
+            simple_diff = simplify(diff)
+            dt3 = time.perf_counter() - t3
+            print(f"f'(x) = {simple_diff}")
+
+            print(f"// simplification of f' took {dt3:.4f}s")
         except NotImplementedError as e:
             print(f"f'(x) = ? ({e})")
+        else:
+            try:
+                t5 = time.perf_counter()
+                red = reduce(Equality(Number(0), simple_diff), Variable("x"))
+                dt5 = time.perf_counter() - t5
+
+                print(f" => f'(x) = 0 <=> {red}")
+                print(f"// reduction of f'=0 took {dt5:.4f}s")
+            except NotImplementedError as e:
+                print(f" => ? ({e})")
+
+        print(f"// {simplify.cache_info()}")
         print()
 
 
