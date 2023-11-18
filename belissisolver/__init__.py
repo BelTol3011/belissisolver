@@ -664,14 +664,17 @@ class LogicalOr(AbstractArgumentExpression):
         return any(arg.eval() for arg in self.args)
 
 
-def reduce(expr: Expression, variable: Variable, depth: int = 20) -> Expression | None:
+def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
+    if depth <= 0:
+        raise NotImplementedError(f"Can't reduce expression {expr} to {variable}. (DEPTH)")
+
     expr = simplify(expr)
 
     if isinstance(expr, Equality):
         if isinstance(expr.rhs, AbstractArgumentExpression):
             if variable in expr.rhs:
                 new_eq = simplify(expr.from_args(Difference.from_args(expr.lhs, expr.rhs), Number(0)))
-                return reduce(new_eq, variable)
+                return reduce(new_eq, variable, depth=depth - 1)
 
         if expr.lhs == variable:
             return expr
@@ -692,13 +695,14 @@ def reduce(expr: Expression, variable: Variable, depth: int = 20) -> Expression 
                 Difference.from_args(expr.rhs, Sum.from_args(*subtract))
             )
 
-            return reduce(new_eq, variable)
+            return reduce(new_eq, variable, depth=depth - 1)
 
         elif isinstance(expr.lhs, Product):
             if expr.rhs == Number(0):
                 # noinspection PyUnresolvedReferences
                 return simplify(LogicalOr.from_args(*(
-                    reduce(Equality(arg, Number(0)), variable) for arg in expr.lhs.args
+                    reduce(Equality(arg, Number(0)), variable, depth=depth - 1)
+                    for arg in expr.lhs.args
                 )))
             else:
                 divide = []
@@ -716,7 +720,7 @@ def reduce(expr: Expression, variable: Variable, depth: int = 20) -> Expression 
                     Quotient.from_args(expr.rhs, Product.from_args(*divide))
                 )
 
-                return reduce(new_eq, variable)
+                return reduce(new_eq, variable, depth=depth - 1)
 
         elif isinstance(expr.lhs, Power):
             # noinspection PyUnresolvedReferences
@@ -738,13 +742,13 @@ def reduce(expr: Expression, variable: Variable, depth: int = 20) -> Expression 
                             Equality.from_args(new_eq.lhs, Product.from_args(Number(-1), new_eq.rhs))
                         )
 
-                return reduce(new_eq, variable)
+                return reduce(new_eq, variable, depth=depth - 1)
 
             # TODO Log on both sides
 
     elif isinstance(expr, LogicalOr):
         return simplify(LogicalOr.from_args(*(
-            reduce(arg, variable) for arg in expr.args
+            reduce(arg, variable, depth=depth - 1) for arg in expr.args
         )))
 
     elif isinstance(expr, Number):
