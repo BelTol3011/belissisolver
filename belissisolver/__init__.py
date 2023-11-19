@@ -111,6 +111,7 @@ class Expression(abc.ABC):
         return self.to_str_formal()
 
     def to_str_formal(self) -> str:
+        return f"{self.__class__.__name__}({', '.join(arg.to_str_formal() for arg in self.args)})"
         return self.to_str_full(False)
 
     def to_str_full(self, prune_no_args: bool = True) -> str:
@@ -591,14 +592,14 @@ class Logarithm(Expression):
             return True
 
     def par_diff(self, i: int, var: Variable) -> Expression:
-        if i == 1:
+        if i == 0:
             return Variable("__close_your_eyes_🙈")
         else:
             return Quotient.from_args(
                 Value(1),
                 Product.from_args(
                     self.argument,
-                    Logarithm.from_args(self.base, self.argument)
+                    Logarithm.from_args(Constant.e, self.base)
                 )
             )
 
@@ -716,7 +717,7 @@ def simplify_abstract_arg_expr(expr: Expression) -> Expression:
 
     expr = expr.from_args(*[simplify(arg) for arg in expr.args])
 
-    if all(arg.is_constant for arg in expr.args):
+    if all(arg.is_constant for arg in expr.args) and not isinstance(expr, Constant):
         try:
             return Value(expr.eval())
         except ExpressionEvaluationException:
@@ -879,6 +880,7 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
     if isinstance(expr, Equality):
         if variable in expr.rhs:
             new_eq = simplify(expr.from_args(Difference.from_args(expr.lhs, expr.rhs), Value(0)))
+            # new_eq = simplify(expr.from_args(Quotient.from_args(expr.lhs, expr.rhs), Value(1)))
             return reduce(new_eq, variable, depth=depth - 1)
 
         out = []
