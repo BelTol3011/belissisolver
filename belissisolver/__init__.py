@@ -65,29 +65,73 @@ class DirectParsingException(ParsingException): ...
 class ExpressionEvaluationException(Exception): ...
 
 
-class Expression(abc.ABC):
-    @abc.abstractmethod
-    def to_str(self) -> str:
-        ...
+_T2 = typing.TypeVar("_T2", bound="Expression")
 
-    def to_pretty_str(self) -> list[str]:
-        return [self.to_str()]
+
+class Expression(abc.ABC):
+    max_args: int | None = None
+    args: tuple[Expression]
+
+    is_commutative: bool
+    is_associative: bool
+    unit_element: Expression
+
+    def __init__(self, *args: Expression):
+        self.args = args
+
+    @classmethod
+    def from_args(cls: typing.Type[_T2], *args: Expression) -> _T2:
+        if len(args) == 1:
+            return args[0]
+
+        assert len(args) != 0
+
+        assert cls.max_args is None or len(args) <= cls.max_args
+
+        return cls(*args)
+
+    def to_str_formal(self) -> str:
+        return self.to_str_full(False)
+
+    def to_str_full(self, prune_no_args: bool = True) -> str:
+        if prune_no_args and not self.args:
+            return self.to_str_formal()
+        else:
+            return f"{self.__class__.__name__}({', '.join(arg.to_str_full() for arg in self.args)})"
 
     @abc.abstractmethod
     def eval(self) -> float:
         ...
 
     @classmethod
-    @abc.abstractmethod
     def parse(cls, expr: str) -> "Expression":
-        ...
+        if expr.startswith(cls.__name__):
+            expr = expr[len(cls.__name__):]
+        else:
+            raise DirectParsingException(f"Can't parse {expr!r} as {cls.__name__}.")
+
+        if not expr.startswith("(") or not expr.endswith(")"):
+            raise DirectParsingException(f"Can't parse {expr!r} as {cls.__name__}.")
+
+        expr = expr[1:-1]
+
+        return cls.from_args(*(Expression.from_str(arg) for arg in parens_aware_split(expr, ",")))
 
     @staticmethod
     def from_str(expr: str) -> "Expression":
         expr = remove_top_level_parens(expr)
 
+        types = (
+            Logarithm, Differentiate,
+            LogicalOr, Equality,
+            Sum, Difference,
+            Product, Quotient,
+            Power,
+            Value, Boolean, Variable
+        )
+
         errors = []
-        for expr_type in LogicalOr, Equality, Sum, Difference, Product, Quotient, Power, Number, Boolean, Variable:
+        for expr_type in types:
             try:
                 return expr_type.parse(expr)
             except (DirectParsingException, ParsingException) as e:
@@ -99,29 +143,49 @@ class Expression(abc.ABC):
                                "".join(f" - {error_msg}\n" for error_msg in errors))
 
     @property
-    @abc.abstractmethod
-    def is_constant(self) -> bool:
-        ...
-
-    def __str__(self):
-        return self.to_str()
-
-    def __repr__(self):
-        return str(self)
-
-    @abc.abstractmethod
-    def __hash__(self):
-        ...
+    def is_constant(self):
+        # TODO: Do I need this? Shouldn't isinstance(x, Value) be enough?
+        return all(arg.is_constant for arg in self.args)
 
     @property
     def is_undefined(self):
         return False
 
+    def par_diff(self, i: int, var: Variable) -> Expression:
+        raise NotImplementedError(f"Unknown partial derivative with respect to {i + 1}. argument of {self}.")
+
+    def __contains__(self, item):
+        return item == self or any(item in arg for arg in self.args)
+
+    def __eq__(self, other):
+        if self.__class__ != other.__class__:
+            return False
+
+        if len(self.args) != len(other.args):
+            return False
+
+        if self.is_commutative:
+            if set(self.args) == set(other.args):
+                return True
+        else:
+            return all((arg1 == arg2) for arg1, arg2 in zip(self.args, other.args))
+
+    def __str__(self):
+        return self.to_str_formal()
+
+    def __repr__(self):
+        return str(self)
+
+    def __hash__(self):
+        return hash((self.__class__.__name__, tuple(self.args)))
+
 
 class Variable(Expression):
+    max_args = 0
     forbidden_chars = "^*+-/(). "
 
     def __init__(self, symbol: str):
+        super().__init__()
         self.symbol = symbol
 
     @classmethod
@@ -137,7 +201,7 @@ class Variable(Expression):
     def eval(self) -> float:
         raise ExpressionEvaluationException(f"Can't evaluate unresolved variable {self.symbol!r}.")
 
-    def to_str(self) -> str:
+    def to_str_formal(self) -> str:
         return self.symbol
 
     @property
@@ -157,21 +221,27 @@ class Variable(Expression):
         return hash(self.symbol)
 
 
-class Number(Expression):
+class Value(Expression):
+    max_args = 0
+
     def __init__(self, value: float):
+        super().__init__()
         self.value = value
 
     @classmethod
     def parse(cls, expr: str) -> "Expression":
         try:
-            return Number(float(expr))
-        except ValueError as e:
-            raise DirectParsingException(f"Can't parse {expr!r} as a number.") from e
+            return Value(int(expr))
+        except ValueError:
+            try:
+                return Value(float(expr))
+            except ValueError as e:
+                raise DirectParsingException(f"Can't parse {expr!r} as a number.") from e
 
     def eval(self) -> float:
         return self.value
 
-    def to_str(self) -> str:
+    def to_str_formal(self) -> str:
         return f"{self.value}"
 
     @property
@@ -182,7 +252,7 @@ class Number(Expression):
         return self == item
 
     def __eq__(self, other):
-        if not isinstance(other, Number):
+        if not isinstance(other, Value):
             return False
 
         return self.value == other.value
@@ -191,12 +261,14 @@ class Number(Expression):
         return hash(self.value)
 
 
-class Constant(Number):
+class Constant(Value):
+    max_args = 0
+
     def __init__(self, symbol: str, value: float):
         super().__init__(value)
         self.symbol = symbol
 
-    def to_str(self) -> str:
+    def to_str_formal(self) -> str:
         return self.symbol
 
 
@@ -204,7 +276,7 @@ Constant.pi = Constant("π", 3.141592653589793)
 Constant.e = Constant("𝑒", 2.718281828459045)
 
 
-class Boolean(Number):
+class Boolean(Value):
     @classmethod
     def parse(cls, expr: str) -> "Expression":
         if expr == "True":
@@ -215,28 +287,8 @@ class Boolean(Number):
         raise DirectParsingException(f"Can't parse {expr!r} as a boolean.")
 
 
-T2 = typing.TypeVar("T2", bound=Expression)
-
-
-class AbstractArgumentExpression(Expression, abc.ABC):
+class _OperatorExpression(Expression, abc.ABC):
     operator: str
-    max_args: int | None = None
-
-    is_commutative: bool
-    is_associative: bool
-    unit_element: Expression | None = None
-
-    def __init__(self, *args: Expression):
-        self.args = args
-
-    @classmethod
-    def from_args(cls: typing.Type[T2], *args: Expression) -> T2:
-        if len(args) == 1:
-            return args[0]
-
-        assert len(args) != 0
-
-        return cls(*args)
 
     @classmethod
     def parse(cls, expr: str) -> "Expression":
@@ -250,39 +302,13 @@ class AbstractArgumentExpression(Expression, abc.ABC):
         else:
             raise DirectParsingException(f"Can't parse {expr!r} as {cls.__name__}.")
 
-    def to_str(self) -> str:
-        return "(" + f" {self.operator} ".join([expr.to_str() for expr in self.args]) + ")"
-
-    @property
-    def is_constant(self):
-        return all(arg.is_constant for arg in self.args)
-
-    def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
-        raise NotImplementedError(f"Unknown partial derivative with respect to {i + 1}. argument of {self.to_str()}.")
-
-    def __hash__(self):
-        return hash(tuple(self.args))
-
-    def __contains__(self, item):
-        return (item in self.args) or any(item in arg for arg in self.args)
-
-    def __eq__(self, other):
-        if not isinstance(other, self.__class__):
-            return False
-
-        if len(self.args) != len(other.args):
-            return False
-
-        if self.is_commutative:
-            if set(self.args) == set(other.args):
-                return True
-        else:
-            return all((arg1 == arg2) for arg1, arg2 in zip(self.args, other.args))
+    def to_str_formal(self) -> str:
+        return "(" + f" {self.operator} ".join([expr.to_str_formal() for expr in self.args]) + ")"
 
 
-class Sum(AbstractArgumentExpression):
+class Sum(_OperatorExpression):
     operator = "+"
-    unit_element = Number(0)
+    unit_element = Value(0)
     is_commutative = True
     is_associative = True
 
@@ -302,12 +328,12 @@ class Sum(AbstractArgumentExpression):
         return sum([arg.eval() for arg in self.args])
 
     def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
-        return Number(1)
+        return Value(1)
 
 
-class Product(AbstractArgumentExpression):
+class Product(_OperatorExpression):
     operator = "*"
-    unit_element = Number(1)
+    unit_element = Value(1)
     is_commutative = True
     is_associative = True
 
@@ -329,33 +355,33 @@ class QuotientsDifferencesMixin:
         )
 
 
-class Quotient(AbstractArgumentExpression, QuotientsDifferencesMixin):
+class Quotient(_OperatorExpression, QuotientsDifferencesMixin):
     operator = "/"
 
     @classmethod
     def from_args(cls, *args: Expression) -> Expression:
         assert len(args) >= 2
 
-        return Product(args[0], *[Power(arg, Number(-1)) for arg in args[1:]])
+        return Product(args[0], *[Power(arg, Value(-1)) for arg in args[1:]])
 
     def eval(self) -> float:
         ...
 
 
-class Difference(AbstractArgumentExpression):
+class Difference(_OperatorExpression):
     operator = "-"
 
     @classmethod
     def from_args(cls, *args: Expression) -> Sum:
         assert len(args) >= 2
 
-        return Sum(args[0], *[Product(arg, Number(-1)) for arg in args[1:]])
+        return Sum(args[0], *[Product(arg, Value(-1)) for arg in args[1:]])
 
     def eval(self) -> float:
         ...
 
 
-class Power(AbstractArgumentExpression):
+class Power(_OperatorExpression):
     operator = "^"
     max_args = 2
     is_commutative = False
@@ -383,18 +409,18 @@ class Power(AbstractArgumentExpression):
 
     @property
     def is_undefined(self):
-        if self.exponent == Number(0) and self.base == Number(0):
+        if self.exponent == Value(0) and self.base == Value(0):
             return True
 
         # noinspection PyUnresolvedReferences
-        if isinstance(self.exponent, Number) and self.exponent.value < 0 and self.base == Number(0):
+        if isinstance(self.exponent, Value) and self.exponent.value < 0 and self.base == Value(0):
             return True
 
     def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
         if i == 0:
             return Product.from_args(
                 self.exponent,
-                Power.from_args(var, Difference.from_args(self.exponent, Number(1)))
+                Power.from_args(var, Difference.from_args(self.exponent, Value(1)))
             )
         else:
             return Product.from_args(
@@ -403,13 +429,13 @@ class Power(AbstractArgumentExpression):
             )
 
 
-class Logarithm(AbstractArgumentExpression):
+class Logarithm(Expression):
     is_commutative = False
     is_associative = False
 
     def eval(self) -> float:
         try:
-            return math.log(self.base.eval(), self.exponent.eval())
+            return math.log(self.base.eval(), self.argument.eval())
         except (ArithmeticError, ValueError) as e:
             raise ExpressionEvaluationException(
                 f"A mathematical error occurred during the evaluation of the expression {self}."
@@ -420,34 +446,38 @@ class Logarithm(AbstractArgumentExpression):
         return self.args[0]
 
     @property
-    def exponent(self):
+    def argument(self):
         return self.args[1]
 
     @property
     def is_undefined(self):
-        if self.exponent == Number(0) and self.base == Number(0):
+        if self.argument == Value(0):
+            return True
+
+        # TODO: Query if argument is negative
+        if isinstance(self.argument, Value) and self.argument.value < 0:
             return True
 
         # noinspection PyUnresolvedReferences
-        if isinstance(self.exponent, Number) and self.exponent.value < 0 and self.base == Number(0):
+        if isinstance(self.argument, Value) and self.argument.value < 0 and self.base == Value(0):
             return True
 
-    def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
-        if i == 0:
-            return Product.from_args(
-                self.exponent,
-                Power.from_args(var, Difference.from_args(self.exponent, Number(1)))
-            )
+    def par_diff(self, i: int, var: Variable) -> Expression:
+        if i == 1:
+            return Variable("__close_your_eyes")
         else:
-            return super().par_diff(i, var)
+            return Quotient.from_args(
+                Value(1),
+                Product.from_args(
+                    self.argument,
+                    Logarithm.from_args(self.base, self.argument)
+                )
+            )
 
-    def to_str(self) -> str:
-        return f"log({self.base.to_str()}, {self.exponent.to_str()})"
 
-
-class Equality(AbstractArgumentExpression):
+class Equality(_OperatorExpression):
     operator = "="
-    max_args = 3
+    max_args = 2
     is_commutative = True
     is_associative = False
     unit_element = Boolean(True)
@@ -464,11 +494,21 @@ class Equality(AbstractArgumentExpression):
         return self.args[1]
 
 
+class LogicalOr(_OperatorExpression):
+    operator = "∨"
+    is_commutative = True
+    is_associative = True
+    unit_element = Boolean(False)
+
+    def eval(self) -> float:
+        return any(arg.eval() for arg in self.args)
+
+
 T = typing.TypeVar("T", bound=Expression)
 
 
 def simplify_associative(expr: T) -> T:
-    if not isinstance(expr, AbstractArgumentExpression) or not expr.is_associative:
+    if not isinstance(expr, _OperatorExpression) or not expr.is_associative:
         return expr
 
     args = []
@@ -479,11 +519,11 @@ def simplify_associative(expr: T) -> T:
         else:
             args.append(arg)
 
-    return expr.__class__(*args)
+    return expr.from_args(*args)
 
 
 def simplify_commutative(expr: T) -> T:
-    if not isinstance(expr, AbstractArgumentExpression) or not expr.is_commutative:
+    if not isinstance(expr, _OperatorExpression) or not expr.is_commutative:
         return expr
 
     args: list[Expression] = []
@@ -494,7 +534,7 @@ def simplify_commutative(expr: T) -> T:
 
     for arg in expr.args:
         if arg != expr.unit_element:
-            if isinstance(arg, Number):
+            if isinstance(arg, Value):
                 numbers.append(arg)
             elif arg.is_constant:
                 constants.append(arg)
@@ -513,10 +553,10 @@ def simplify_commutative(expr: T) -> T:
 
 
 def simplify_abstract_arg_expr(expr: T) -> T:
-    if isinstance(expr, Number):
+    if isinstance(expr, Value):
         return expr
 
-    if isinstance(expr, AbstractArgumentExpression):
+    if isinstance(expr, _OperatorExpression):
         for arg in expr.args:
             if arg.is_undefined:
                 return arg
@@ -525,7 +565,7 @@ def simplify_abstract_arg_expr(expr: T) -> T:
 
         if all(arg.is_constant for arg in expr.args):
             try:
-                return Number(expr.eval())
+                return Value(expr.eval())
             except ExpressionEvaluationException:
                 pass
 
@@ -539,23 +579,26 @@ def simplify_abstract_arg_expr(expr: T) -> T:
 def simplify(expr: Expression) -> Expression:
     expr = simplify_abstract_arg_expr(expr)
 
+    if expr.is_undefined:
+        return expr
+
     if isinstance(expr, Sum):
         # combine factors
         args: dict[Expression, list[Expression]] = defaultdict(list)
 
         for arg in expr.args:
             if isinstance(arg, Product):
-                numbers = list(filter(lambda x: isinstance(x, Number), arg.args))
-                others = list(filter(lambda x: not isinstance(x, Number), arg.args))
+                numbers = list(filter(lambda x: isinstance(x, Value), arg.args))
+                others = list(filter(lambda x: not isinstance(x, Value), arg.args))
 
                 if not numbers:
-                    numbers = [Number(1)]
+                    numbers = [Value(1)]
                 if not others:
-                    others = [Number(1)]
+                    others = [Value(1)]
 
                 args[Product.from_args(*others)].append(Product.from_args(*numbers))
             else:
-                args[arg].append(Number(1))
+                args[arg].append(Value(1))
 
         return simplify_abstract_arg_expr(
             Sum.from_args(*(
@@ -568,8 +611,8 @@ def simplify(expr: Expression) -> Expression:
         args: dict[Expression, list[Expression]] = defaultdict(list)
 
         for arg in expr.args:
-            if arg == Number(0):
-                return Number(0)
+            if arg == Value(0):
+                return Value(0)
 
             if isinstance(arg, Power):
                 base_args = arg.base
@@ -579,7 +622,7 @@ def simplify(expr: Expression) -> Expression:
                 else:
                     args[arg.base].append(arg.exponent)
             else:
-                args[arg].append(Number(1))
+                args[arg].append(Value(1))
 
         return simplify_abstract_arg_expr(
             Product.from_args(*(
@@ -594,11 +637,11 @@ def simplify(expr: Expression) -> Expression:
         # if expr.base == Number(0):
         #     return Number(0)
 
-        if expr.exponent == Number(1):
+        if expr.exponent == Value(1):
             return expr.base
 
-        if expr.exponent == Number(0) and expr.base != Number(0):
-            return Number(1)
+        if expr.exponent == Value(0) and expr.base != Value(0):
+            return Value(1)
 
         return expr
 
@@ -606,20 +649,27 @@ def simplify(expr: Expression) -> Expression:
         if expr.lhs == expr.rhs:
             return Boolean(True)
 
+    elif isinstance(expr, Logarithm):
+        if expr.base == expr.argument:
+            return Value(1)
+
+        if expr.argument == Value(1):
+            return Value(0)
+
     return expr
 
 
 def differentiate(expr: Expression, var: Variable) -> Expression:
     if expr.is_constant:
-        return Number(0)
+        return Value(0)
 
     if isinstance(expr, Variable):
         if expr == var:
-            return Number(1)
+            return Value(1)
         else:
-            return Number(0)
+            return Value(0)
 
-    if isinstance(expr, AbstractArgumentExpression):
+    if expr.args:
         # see https://en.wikipedia.org/wiki/Chain_rule#Case_of_scalar-valued_functions_with_multiple_inputs
 
         args = []
@@ -637,43 +687,48 @@ def differentiate(expr: Expression, var: Variable) -> Expression:
     raise NotImplementedError(f"Can't differentiate {expr} with respect to {var}.")
 
 
+def create_func(name: str, function: typing.Callable[[Expression, ...], Expression]) -> Expression:
+    def from_args(cls: typing.Type[_T2], *args: Expression) -> _T2:
+        return function(*args)
+
+    def raise_not_implemented(self: Expression) -> float:
+        raise NotImplementedError(f"Can't evaluate {self}.")
+
+    # noinspection PyTypeChecker
+    return type(name, (Expression,), {
+        "from_args": classmethod(from_args),
+        "eval": raise_not_implemented
+    })
+
+
+Differentiate = create_func("D", differentiate)
+
+
 def substitute(expr: Expression, key: Expression, to: Expression):
-    if isinstance(expr, AbstractArgumentExpression):
+    if expr == key:
+        return to
+
+    if isinstance(expr, _OperatorExpression):
         args = []
 
         for arg in expr.args:
-            if arg == key:
-                args.append(to)
-            elif isinstance(arg, AbstractArgumentExpression):
-                args.append(substitute(arg, key, to))
-            else:
-                args.append(arg)
+            args.append(substitute(arg, key, to))
 
         return expr.from_args(*args)
 
     return expr
 
 
-class LogicalOr(AbstractArgumentExpression):
-    operator = "∨"
-    is_commutative = True
-    is_associative = True
-    unit_element = Boolean(False)
-
-    def eval(self) -> float:
-        return any(arg.eval() for arg in self.args)
-
-
 def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
     if depth <= 0:
-        raise NotImplementedError(f"Can't reduce expression {expr} to {variable}. (DEPTH)")
+        return expr
 
     expr = simplify(expr)
 
     if isinstance(expr, Equality):
-        if isinstance(expr.rhs, AbstractArgumentExpression):
+        if isinstance(expr.rhs, _OperatorExpression):
             if variable in expr.rhs:
-                new_eq = simplify(expr.from_args(Difference.from_args(expr.lhs, expr.rhs), Number(0)))
+                new_eq = simplify(expr.from_args(Difference.from_args(expr.lhs, expr.rhs), Value(0)))
                 return reduce(new_eq, variable, depth=depth - 1)
 
         if expr.lhs == variable:
@@ -688,6 +743,7 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
                     subtract.append(arg)
 
             if not subtract:
+                return expr
                 raise NotImplementedError(f"Can't reduce expression {expr} to {variable}. (SUM)")
 
             new_eq = expr.from_args(
@@ -698,10 +754,10 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
             return reduce(new_eq, variable, depth=depth - 1)
 
         elif isinstance(expr.lhs, Product):
-            if expr.rhs == Number(0):
+            if expr.rhs == Value(0):
                 # noinspection PyUnresolvedReferences
                 return simplify(LogicalOr.from_args(*(
-                    reduce(Equality(arg, Number(0)), variable, depth=depth - 1)
+                    reduce(Equality(arg, Value(0)), variable, depth=depth - 1)
                     for arg in expr.lhs.args
                 )))
             else:
@@ -713,6 +769,7 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
                         divide.append(arg)
 
                 if not divide:
+                    return expr
                     raise NotImplementedError(f"Can't reduce expression {expr} to {variable}. (PRODUCT)")
 
                 new_eq = expr.from_args(
@@ -727,19 +784,19 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
             if variable in expr.lhs.base and variable not in expr.lhs.exponent:
                 # noinspection PyUnresolvedReferences
                 new_eq = expr.from_args(
-                    Power.from_args(expr.lhs, Quotient.from_args(Number(1), expr.lhs.exponent)),
-                    Power.from_args(expr.rhs, Quotient.from_args(Number(1), expr.lhs.exponent)),
+                    Power.from_args(expr.lhs, Quotient.from_args(Value(1), expr.lhs.exponent)),
+                    Power.from_args(expr.rhs, Quotient.from_args(Value(1), expr.lhs.exponent)),
                 )
                 # reduce(ThereExists.from_args(Variable("n"), ElementOf.from_args(Variable("n"), NaturalNumbers(),
                 # Equality.from_args(expr.lhs.exponent, Product.from_args(Number(2), expr.lhs.exponent)))),
                 # Variable("n"))
                 # TODO: Query if exponent is even
 
-                if isinstance(expr.lhs.exponent, Number):
+                if isinstance(expr.lhs.exponent, Value):
                     if expr.lhs.exponent.value % 2 == 0:
                         new_eq = LogicalOr.from_args(
                             new_eq,
-                            Equality.from_args(new_eq.lhs, Product.from_args(Number(-1), new_eq.rhs))
+                            Equality.from_args(new_eq.lhs, Product.from_args(Value(-1), new_eq.rhs))
                         )
 
                 return reduce(new_eq, variable, depth=depth - 1)
@@ -751,9 +808,10 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
             reduce(arg, variable, depth=depth - 1) for arg in expr.args
         )))
 
-    elif isinstance(expr, Number):
+    elif isinstance(expr, Value):
         return expr
 
+    return expr
     raise NotImplementedError(f"Can't reduce expression {expr} to {variable}.")
 
 
@@ -787,11 +845,11 @@ def interactive_fuzz():
 def generate_random_expression(max_levels: 5) -> Expression:
     if max_levels == 0:
         if random.random() > .5:
-            return Number((random.random() * 100 - 50) // 1)
+            return Value((random.random() * 100 - 50) // 1)
         else:
             return Variable(random.choice("x"))
 
-    expr_type: type[AbstractArgumentExpression] = random.choice((Sum, Product, Power))
+    expr_type: type[_OperatorExpression] = random.choice((Sum, Product, Power))
 
     if expr_type.max_args:
         args = [generate_random_expression(max_levels - 1) for _ in range(random.randint(2, expr_type.max_args))]
@@ -818,6 +876,7 @@ def main():
             continue
 
         print(f"f(x) = {expr}")
+        print(f"f(x) = {expr.to_str_full()}")
 
         t1 = time.perf_counter()
         simple = simplify(expr)
@@ -834,12 +893,12 @@ def main():
         try:
             evaluated = simple.eval()
 
-            if Number(evaluated) != simple:
+            if Value(evaluated) != simple:
                 print(f"f(x) ≈ {evaluated}")
         except ExpressionEvaluationException as e:
             print(f"f(x) ≈ ? ({e})")
 
-        fx1 = simplify(substitute(simple, Variable("x"), Number(1)))
+        fx1 = simplify(substitute(simple, Variable("x"), Value(1)))
 
         print(f"f(1) = {fx1}")
 
@@ -862,7 +921,7 @@ def main():
 
         try:
             t4 = time.perf_counter()
-            red = reduce(Equality(Number(0), simple), Variable("x"))
+            red = reduce(Equality(Value(0), simple), Variable("x"))
             dt4 = time.perf_counter() - t4
 
             print(f" => f(x)=0 <=> {red}")
@@ -889,7 +948,7 @@ def main():
         else:
             try:
                 t5 = time.perf_counter()
-                red = reduce(Equality(Number(0), simple_diff), Variable("x"))
+                red = reduce(Equality(Value(0), simple_diff), Variable("x"))
                 dt5 = time.perf_counter() - t5
 
                 print(f" => f'(x) = 0 <=> {red}")
@@ -901,5 +960,33 @@ def main():
         print()
 
 
+def main2():
+    i = 0
+    while 1:
+        cell_num = str(i)
+
+        expr = input(f" [{cell_num}] ")
+        if not expr.strip():
+            continue
+        try:
+            expr = Expression.from_str(expr)
+        except ParsingException as e:
+            print(f" -> {e}")
+            continue
+
+        expr = substitute(expr, Variable("e"), Constant.e)
+        expr = substitute(expr, Variable("pi"), Constant.pi)
+
+        # print(f" {' '* len(cell_num)}>  {expr}")
+        # print(f" {' ' * len(cell_num)}>  {expr.to_str_full()}")
+
+        simple = simplify(expr)
+
+        print(f" {' ' * len(cell_num)}>  {simple}")
+
+        print()
+        i += 1
+
+
 if __name__ == '__main__':
-    main()
+    main2()
