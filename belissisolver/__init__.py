@@ -65,30 +65,47 @@ class DirectParsingException(ParsingException): ...
 class ExpressionEvaluationException(Exception): ...
 
 
-_T2 = typing.TypeVar("_T2", bound="Expression")
-
-
 class Expression(abc.ABC):
+    class _FromArgsDesc:
+        def __get__(self, instance, owner):
+            if instance is None:
+                return owner._from_args_class
+            else:
+                return functools.partial(owner._from_args_instance, instance)
+
     max_args: int | None = None
     args: tuple[Expression]
 
-    is_commutative: bool
-    is_associative: bool
+    is_commutative: bool = False
+    is_associative: bool = False
     unit_element: Expression
 
     def __init__(self, *args: Expression):
         self.args = args
 
+    from_args = _FromArgsDesc()
+
     @classmethod
-    def from_args(cls: typing.Type[_T2], *args: Expression) -> _T2:
-        if len(args) == 1:
-            return args[0]
+    def _from_args_class(cls, *args: Expression) -> Expression:
+        assert cls.max_args != 0, "Use instance.from_args() instead."
 
         assert len(args) != 0
 
         assert cls.max_args is None or len(args) <= cls.max_args
 
-        return cls(*args)
+        if cls.is_commutative and len(args) == 1:
+            return args[0]
+        else:
+            return cls(*args)
+
+    def _from_args_instance(self, *args: Expression) -> Expression:
+        if self.max_args == 0:
+            return self
+        else:
+            return self._from_args_class(*args)
+
+    def to_str_human(self, parent: Expression | None = None):
+        return self.to_str_formal()
 
     def to_str_formal(self) -> str:
         return self.to_str_full(False)
@@ -122,7 +139,8 @@ class Expression(abc.ABC):
         expr = remove_top_level_parens(expr)
 
         types = (
-            Logarithm, Differentiate,
+            Logarithm,
+            _Differentiate, _Reduce, _Substitute,
             LogicalOr, Equality,
             Sum, Difference,
             Product, Quotient,
@@ -153,6 +171,9 @@ class Expression(abc.ABC):
 
     def par_diff(self, i: int, var: Variable) -> Expression:
         raise NotImplementedError(f"Unknown partial derivative with respect to {i + 1}. argument of {self}.")
+
+    def doit(self) -> Expression:
+        return self.from_args(*(arg.doit() for arg in self.args))
 
     def __contains__(self, item):
         return item == self or any(item in arg for arg in self.args)
@@ -234,7 +255,7 @@ class Value(Expression):
             return Value(int(expr))
         except ValueError:
             try:
-                return Value(float(expr))
+                return Value((float(expr)))
             except ValueError as e:
                 raise DirectParsingException(f"Can't parse {expr!r} as a number.") from e
 
@@ -247,6 +268,14 @@ class Value(Expression):
     @property
     def is_constant(self):
         return True
+
+    def to_str_human(self, parent: Expression | None = None):
+        out = self.to_str_formal()
+
+        if out.startswith("-") and parent is not None:
+            return f"({out})"
+        else:
+            return out
 
     def __contains__(self, item):
         return self == item
@@ -305,6 +334,12 @@ class _OperatorExpression(Expression, abc.ABC):
     def to_str_formal(self) -> str:
         return "(" + f" {self.operator} ".join([expr.to_str_formal() for expr in self.args]) + ")"
 
+    def _to_str_human_no_parens(self, parent: Expression | None = None):
+        return f" {self.operator} ".join([expr.to_str_human(self) for expr in self.args])
+
+    def _to_str_human_parens(self, parent: Expression | None = None):
+        return "(" + self._to_str_human_no_parens(self) + ")"
+
 
 class Sum(_OperatorExpression):
     operator = "+"
@@ -323,6 +358,12 @@ class Sum(_OperatorExpression):
             sum_args.append(Quotient.from_args(arg, expr))
 
         return Product(expr, Sum.from_args(*sum_args))
+
+    def to_str_human(self, parent: Expression | None = None):
+        if parent is None or isinstance(parent, Sum):
+            return self._to_str_human_no_parens()
+        else:
+            return self._to_str_human_parens()
 
     def eval(self) -> float:
         return sum([arg.eval() for arg in self.args])
@@ -345,6 +386,12 @@ class Product(_OperatorExpression):
 
     def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
         return Product.from_args(*(arg for j, arg in enumerate(self.args) if j != i))
+
+    def to_str_human(self, parent: Expression | None = None):
+        if parent is None or isinstance(parent, (Product, Sum)):
+            return self._to_str_human_no_parens()
+        else:
+            return self._to_str_human_parens()
 
 
 class QuotientsDifferencesMixin:
@@ -435,7 +482,7 @@ class Logarithm(Expression):
 
     def eval(self) -> float:
         try:
-            return math.log(self.base.eval(), self.argument.eval())
+            return math.log(self.argument.eval(), self.base.eval())
         except (ArithmeticError, ValueError) as e:
             raise ExpressionEvaluationException(
                 f"A mathematical error occurred during the evaluation of the expression {self}."
@@ -508,7 +555,7 @@ T = typing.TypeVar("T", bound=Expression)
 
 
 def simplify_associative(expr: T) -> T:
-    if not isinstance(expr, _OperatorExpression) or not expr.is_associative:
+    if not expr.is_associative:
         return expr
 
     args = []
@@ -523,7 +570,7 @@ def simplify_associative(expr: T) -> T:
 
 
 def simplify_commutative(expr: T) -> T:
-    if not isinstance(expr, _OperatorExpression) or not expr.is_commutative:
+    if not expr.is_commutative:
         return expr
 
     args: list[Expression] = []
@@ -556,21 +603,20 @@ def simplify_abstract_arg_expr(expr: T) -> T:
     if isinstance(expr, Value):
         return expr
 
-    if isinstance(expr, _OperatorExpression):
-        for arg in expr.args:
-            if arg.is_undefined:
-                return arg
+    for arg in expr.args:
+        if arg.is_undefined:
+            return arg
 
-        expr = expr.__class__.from_args(*[simplify(arg) for arg in expr.args])
+    expr = expr.from_args(*[simplify(arg) for arg in expr.args])
 
-        if all(arg.is_constant for arg in expr.args):
-            try:
-                return Value(expr.eval())
-            except ExpressionEvaluationException:
-                pass
+    if all(arg.is_constant for arg in expr.args):
+        try:
+            return Value(expr.eval())
+        except ExpressionEvaluationException:
+            pass
 
-        expr = simplify_associative(expr)
-        expr = simplify_commutative(expr)
+    expr = simplify_associative(expr)
+    expr = simplify_commutative(expr)
 
     return expr
 
@@ -688,35 +734,29 @@ def differentiate(expr: Expression, var: Variable) -> Expression:
 
 
 def create_func(name: str, function: typing.Callable[[Expression, ...], Expression]) -> Expression:
-    def from_args(cls: typing.Type[_T2], *args: Expression) -> _T2:
-        return function(*args)
+    def doit(self):
+        return function(*(super(self.__class__, self).doit()).args)
 
     def raise_not_implemented(self: Expression) -> float:
         raise NotImplementedError(f"Can't evaluate {self}.")
 
     # noinspection PyTypeChecker
     return type(name, (Expression,), {
-        "from_args": classmethod(from_args),
+        "doit": doit,
         "eval": raise_not_implemented
     })
-
-
-Differentiate = create_func("D", differentiate)
 
 
 def substitute(expr: Expression, key: Expression, to: Expression):
     if expr == key:
         return to
 
-    if isinstance(expr, _OperatorExpression):
-        args = []
+    args = []
 
-        for arg in expr.args:
-            args.append(substitute(arg, key, to))
+    for arg in expr.args:
+        args.append(substitute(arg, key, to))
 
-        return expr.from_args(*args)
-
-    return expr
+    return expr.from_args(*args)
 
 
 def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
@@ -744,7 +784,6 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
 
             if not subtract:
                 return expr
-                raise NotImplementedError(f"Can't reduce expression {expr} to {variable}. (SUM)")
 
             new_eq = expr.from_args(
                 Difference.from_args(expr.lhs, Sum.from_args(*subtract)),
@@ -770,7 +809,6 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
 
                 if not divide:
                     return expr
-                    raise NotImplementedError(f"Can't reduce expression {expr} to {variable}. (PRODUCT)")
 
                 new_eq = expr.from_args(
                     Quotient.from_args(expr.lhs, Product.from_args(*divide)),
@@ -812,7 +850,11 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
         return expr
 
     return expr
-    raise NotImplementedError(f"Can't reduce expression {expr} to {variable}.")
+
+
+_Differentiate = create_func("D", differentiate)
+_Reduce = create_func("Reduce", reduce)
+_Substitute = create_func("Subst", substitute)
 
 
 def gen_fuzz(length=20):
@@ -977,12 +1019,17 @@ def main2():
         expr = substitute(expr, Variable("e"), Constant.e)
         expr = substitute(expr, Variable("pi"), Constant.pi)
 
+        expr = expr.doit()
+
         # print(f" {' '* len(cell_num)}>  {expr}")
         # print(f" {' ' * len(cell_num)}>  {expr.to_str_full()}")
 
         simple = simplify(expr)
 
-        print(f" {' ' * len(cell_num)}>  {simple}")
+        # print(f" {' ' * len(cell_num)}>  {simple}")
+        print(f" {' ' * len(cell_num)}>  {simple.to_str_human()}")
+        if simple.is_undefined:
+            print(f" {' ' * len(cell_num)}!  Expression is undefined.")
 
         print()
         i += 1
