@@ -526,7 +526,6 @@ class Equality(_OperatorExpression):
     max_args = 2
     is_commutative = True
     is_associative = False
-    is_idempotent = True
     unit_element = Boolean(True)
 
     def eval(self) -> float:
