@@ -78,6 +78,7 @@ class Expression(abc.ABC):
 
     is_commutative: bool = False
     is_associative: bool = False
+    is_idempotent: bool = False
     unit_element: Expression
 
     def __init__(self, *args: Expression):
@@ -334,10 +335,10 @@ class _OperatorExpression(Expression, abc.ABC):
     def to_str_formal(self) -> str:
         return "(" + f" {self.operator} ".join([expr.to_str_formal() for expr in self.args]) + ")"
 
-    def _to_str_human_no_parens(self, parent: Expression | None = None):
+    def _to_str_human_no_parens(self):
         return f" {self.operator} ".join([expr.to_str_human(self) for expr in self.args])
 
-    def _to_str_human_parens(self, parent: Expression | None = None):
+    def _to_str_human_parens(self):
         return "(" + self._to_str_human_no_parens(self) + ")"
 
 
@@ -431,8 +432,6 @@ class Difference(_OperatorExpression):
 class Power(_OperatorExpression):
     operator = "^"
     max_args = 2
-    is_commutative = False
-    is_associative = False
 
     @classmethod
     def parse(cls, expr: str) -> "Expression":
@@ -527,6 +526,7 @@ class Equality(_OperatorExpression):
     max_args = 2
     is_commutative = True
     is_associative = False
+    is_idempotent = True
     unit_element = Boolean(True)
 
     def eval(self) -> float:
@@ -545,16 +545,21 @@ class LogicalOr(_OperatorExpression):
     operator = "∨"
     is_commutative = True
     is_associative = True
+    is_idempotent = True
     unit_element = Boolean(False)
 
     def eval(self) -> float:
         return any(arg.eval() for arg in self.args)
 
 
-T = typing.TypeVar("T", bound=Expression)
+def simplify_idempotent(expr: Expression) -> Expression:
+    if not expr.is_idempotent:
+        return expr
+
+    return expr.from_args(*set(expr.args))
 
 
-def simplify_associative(expr: T) -> T:
+def simplify_associative(expr: Expression) -> Expression:
     if not expr.is_associative:
         return expr
 
@@ -569,7 +574,7 @@ def simplify_associative(expr: T) -> T:
     return expr.from_args(*args)
 
 
-def simplify_commutative(expr: T) -> T:
+def simplify_commutative(expr: Expression) -> Expression:
     if not expr.is_commutative:
         return expr
 
@@ -599,7 +604,7 @@ def simplify_commutative(expr: T) -> T:
     return expr
 
 
-def simplify_abstract_arg_expr(expr: T) -> T:
+def simplify_abstract_arg_expr(expr: Expression) -> Expression:
     if isinstance(expr, Value):
         return expr
 
@@ -617,6 +622,7 @@ def simplify_abstract_arg_expr(expr: T) -> T:
 
     expr = simplify_associative(expr)
     expr = simplify_commutative(expr)
+    expr = simplify_idempotent(expr)
 
     return expr
 
