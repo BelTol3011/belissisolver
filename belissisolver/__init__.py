@@ -354,10 +354,10 @@ class _OperatorExpression(Expression, abc.ABC):
     def to_str_formal(self) -> str:
         return "(" + f" {self.operator} ".join([expr.to_str_formal() for expr in self.args]) + ")"
 
-    def _to_str_human_no_parens(self):
+    def _to_str_human_no_parens(self, parent: Expression):
         return f" {self.operator} ".join([expr.to_str_human(self) for expr in self.args])
 
-    def _to_str_human_parens(self):
+    def _to_str_human_parens(self, parent: Expression):
         return "(" + self._to_str_human_no_parens(self) + ")"
 
 
@@ -381,9 +381,9 @@ class Sum(_OperatorExpression):
 
     def to_str_human(self, parent: Expression | None = None):
         if parent is None or isinstance(parent, Sum):
-            return self._to_str_human_no_parens()
+            return self._to_str_human_no_parens(parent)
         else:
-            return self._to_str_human_parens()
+            return self._to_str_human_parens(parent)
 
     def eval(self) -> float:
         return sum([arg.eval() for arg in self.args])
@@ -409,9 +409,9 @@ class Product(_OperatorExpression):
 
     def to_str_human(self, parent: Expression | None = None):
         if parent is None or isinstance(parent, (Product, Sum)):
-            return self._to_str_human_no_parens()
+            return self._to_str_human_no_parens(parent)
         else:
-            return self._to_str_human_parens()
+            return self._to_str_human_parens(parent)
 
     def par_diff(self, i: int, var: Variable) -> Expression:
         return Product.from_args(*(arg for j, arg in enumerate(self.args) if j != i))
@@ -881,19 +881,21 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
             new_eq = simplify(expr.from_args(Difference.from_args(expr.lhs, expr.rhs), Value(0)))
             return reduce(new_eq, variable, depth=depth - 1)
 
+        out = []
         for i, arg in enumerate(expr.lhs.args):
             if variable in arg:
                 arg_sols = expr.lhs.inverse(i, expr.rhs)
 
                 u = UniqueVariable()
 
-                var_sol = reduce(Equality(arg, u), variable, depth=depth-1)
+                var_sol = reduce(Equality(arg, u), variable, depth=depth - 1)
 
-                return simplify(LogicalOr.from_args(*(
-                    substitute(var_sol, u, arg_sol) for arg_sol in arg_sols
-                )))
-        else:
+                out += (substitute(var_sol, u, arg_sol) for arg_sol in arg_sols)
+
+        if not out:
             return expr
+
+        return simplify(LogicalOr.from_args(*out))
 
     elif isinstance(expr, LogicalOr):
         return simplify(LogicalOr.from_args(*(
