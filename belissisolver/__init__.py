@@ -524,7 +524,7 @@ class Logarithm(Expression):
 class Equality(_OperatorExpression):
     operator = "="
     max_args = 2
-    is_commutative = True
+    is_commutative = False  # this should be True, but Eq is special
     is_associative = False
     unit_element = Boolean(True)
 
@@ -604,9 +604,6 @@ def simplify_commutative(expr: Expression) -> Expression:
 
 
 def simplify_abstract_arg_expr(expr: Expression) -> Expression:
-    if isinstance(expr, Value):
-        return expr
-
     for arg in expr.args:
         if arg.is_undefined:
             return arg
@@ -771,10 +768,9 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
     expr = simplify(expr)
 
     if isinstance(expr, Equality):
-        if isinstance(expr.rhs, _OperatorExpression):
-            if variable in expr.rhs:
-                new_eq = simplify(expr.from_args(Difference.from_args(expr.lhs, expr.rhs), Value(0)))
-                return reduce(new_eq, variable, depth=depth - 1)
+        if variable in expr.rhs:
+            new_eq = simplify(expr.from_args(Difference.from_args(expr.lhs, expr.rhs), Value(0)))
+            return reduce(new_eq, variable, depth=depth - 1)
 
         if expr.lhs == variable:
             return expr
