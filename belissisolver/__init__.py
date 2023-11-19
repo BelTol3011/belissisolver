@@ -67,12 +67,13 @@ class ExpressionEvaluationException(Exception): ...
 
 class Expression(abc.ABC):
     class _FromArgsDesc:
-        def __get__(self, instance, owner):
+        def __get__(self, instance, owner) -> typing.Callable[..., Expression]:
             if instance is None:
                 return owner._from_args_class
             else:
                 return functools.partial(owner._from_args_instance, instance)
 
+    min_args: int = 0
     max_args: int | None = None
     args: tuple[Expression]
 
@@ -93,6 +94,7 @@ class Expression(abc.ABC):
         assert len(args) != 0
 
         assert cls.max_args is None or len(args) <= cls.max_args
+        assert len(args) >= cls.min_args
 
         if cls.is_commutative and len(args) == 1:
             return args[0]
@@ -170,8 +172,11 @@ class Expression(abc.ABC):
     def is_undefined(self):
         return False
 
-    def par_diff(self, i: int, var: Variable) -> Expression:
+    def par_diff(self, i: int, var: Expression) -> Expression:
         raise NotImplementedError(f"Unknown partial derivative with respect to {i + 1}. argument of {self}.")
+
+    def inverse(self, i: int, result: Expression) -> typing.Collection[Expression]:
+        raise NotImplementedError(f"Can't invert this expression using {i + 1}. argument of {self}.")
 
     def doit(self) -> Expression:
         return self.from_args(*(arg.doit() for arg in self.args))
@@ -200,6 +205,9 @@ class Expression(abc.ABC):
 
     def __hash__(self):
         return hash((self.__class__.__name__, tuple(self.args)))
+
+
+class BooleanExpression: pass
 
 
 class Variable(Expression):
@@ -241,6 +249,17 @@ class Variable(Expression):
 
     def __hash__(self):
         return hash(self.symbol)
+
+
+class UniqueVariable(Variable):
+    def __init__(self):
+        super().__init__(f"<U{id(self)}>")
+
+    def __eq__(self, other):
+        return self is other
+
+    def __hash__(self):
+        return hash(id(self))
 
 
 class Value(Expression):
@@ -306,7 +325,7 @@ Constant.pi = Constant("π", 3.141592653589793)
 Constant.e = Constant("𝑒", 2.718281828459045)
 
 
-class Boolean(Value):
+class Boolean(Value, BooleanExpression):
     @classmethod
     def parse(cls, expr: str) -> "Expression":
         if expr == "True":
@@ -369,8 +388,11 @@ class Sum(_OperatorExpression):
     def eval(self) -> float:
         return sum([arg.eval() for arg in self.args])
 
-    def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
+    def par_diff(self, i: int, var: Expression) -> Expression:
         return Value(1)
+
+    def inverse(self, i: int, result: Expression) -> tuple[Expression]:
+        return Difference.from_args(result, *(arg for j, arg in enumerate(self.args) if j != i)),
 
 
 class Product(_OperatorExpression):
@@ -385,14 +407,17 @@ class Product(_OperatorExpression):
             product *= arg.eval()
         return product
 
-    def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
-        return Product.from_args(*(arg for j, arg in enumerate(self.args) if j != i))
-
     def to_str_human(self, parent: Expression | None = None):
         if parent is None or isinstance(parent, (Product, Sum)):
             return self._to_str_human_no_parens()
         else:
             return self._to_str_human_parens()
+
+    def par_diff(self, i: int, var: Variable) -> Expression:
+        return Product.from_args(*(arg for j, arg in enumerate(self.args) if j != i))
+
+    def inverse(self, i: int, result: Expression) -> tuple[Expression]:
+        return Quotient.from_args(result, *(arg for j, arg in enumerate(self.args) if j != i)),
 
 
 class QuotientsDifferencesMixin:
@@ -429,6 +454,47 @@ class Difference(_OperatorExpression):
         ...
 
 
+class IsEven(Expression):
+    # don't have resolve yet, so can't prove this :(
+
+    max_args = 1
+
+    def eval(self) -> float:
+        return self.args[0].eval() % 2 == 0
+
+
+class Piecewise(Expression):
+    is_commutative = False
+    is_associative = False
+
+    def eval(self) -> float:
+        for arg, cond in self.iter_args():
+            if cond.eval():
+                return arg.eval()
+
+    def _from_args_instance(self, *args: Expression) -> Expression:
+        assert len(args) % 2 == 0, "Piecewise expressions must have an even number of arguments."
+
+        return self._from_args_class(*args)
+
+    def iter_args(self) -> typing.Iterable[tuple[Expression, Expression]]:
+        for i in range(0, len(self.args), 2):
+            yield self.args[i], self.args[i + 1]
+
+    def par_diff(self, i: int, var: Expression) -> Expression:
+        if i % 2 != 0:
+            raise NotImplementedError("Can't differentiate a piecewise function with respect to its condition.")
+
+        return Piecewise.from_args(*zip(
+            # TODO somehow inform par_diff of condition
+            (arg.par_diff(i, var) for arg in self.args[::2]),
+            self.args[1::2]
+        ))
+
+    def inverse(self, i: int, result: Expression) -> tuple[Expression]:
+        raise NotImplementedError("Can't yet invert a piecewise function, sorry. :(")
+
+
 class Power(_OperatorExpression):
     operator = "^"
     max_args = 2
@@ -462,7 +528,7 @@ class Power(_OperatorExpression):
         if isinstance(self.exponent, Value) and self.exponent.value < 0 and self.base == Value(0):
             return True
 
-    def par_diff(self, i: int, var: Variable = Variable("__z")) -> Expression:
+    def par_diff(self, i: int, var: Expression) -> Expression:
         if i == 0:
             return Product.from_args(
                 self.exponent,
@@ -473,6 +539,22 @@ class Power(_OperatorExpression):
                 self,
                 Logarithm.from_args(Constant.e, self.base)
             )
+
+    def inverse(self, i: int, result: Expression) -> tuple[Expression, ...]:
+        if i == 0:
+            # two solutions iff exponent is even
+            sol = Power.from_args(result, Quotient.from_args(Value(1), self.exponent))
+            if_even = Product.from_args(sol, Value(-1))
+
+            return (
+                sol,
+                Piecewise.from_args(
+                    if_even,
+                    IsEven.from_args(self.exponent)
+                )
+            )
+        else:
+            return Logarithm.from_args(self.base, result),
 
 
 class Logarithm(Expression):
@@ -510,7 +592,7 @@ class Logarithm(Expression):
 
     def par_diff(self, i: int, var: Variable) -> Expression:
         if i == 1:
-            return Variable("__close_your_eyes")
+            return Variable("__close_your_eyes_🙈")
         else:
             return Quotient.from_args(
                 Value(1),
@@ -520,9 +602,16 @@ class Logarithm(Expression):
                 )
             )
 
+    def inverse(self, i: int, result: Expression) -> tuple[Expression]:
+        if i == 0:
+            raise NotImplementedError("Can't invert logarithm with respect to base.")
+        else:
+            return Power.from_args(self.base, result),
 
-class Equality(_OperatorExpression):
+
+class Equality(_OperatorExpression, BooleanExpression):
     operator = "="
+    min_args = 2
     max_args = 2
     is_commutative = False  # this should be True, but Eq is special
     is_associative = False
@@ -540,7 +629,7 @@ class Equality(_OperatorExpression):
         return self.args[1]
 
 
-class LogicalOr(_OperatorExpression):
+class LogicalOr(_OperatorExpression, BooleanExpression):
     operator = "∨"
     is_commutative = True
     is_associative = True
@@ -549,6 +638,23 @@ class LogicalOr(_OperatorExpression):
 
     def eval(self) -> float:
         return any(arg.eval() for arg in self.args)
+
+    @classmethod
+    def _from_args_class(cls, *args: Expression) -> Expression:
+        assert all(isinstance(arg, BooleanExpression) for arg in args), "LogicalOr only accepts BooleanExpressions."
+
+        return super(cls, cls)._from_args_class(*args)
+
+
+class LogicalAnd(_OperatorExpression, BooleanExpression):
+    operator = "∧"
+    is_commutative = True
+    is_associative = True
+    is_idempotent = True
+    unit_element = Boolean(True)
+
+    def eval(self) -> float:
+        return all(arg.eval() for arg in self.args)
 
 
 def simplify_idempotent(expr: Expression) -> Expression:
@@ -625,8 +731,8 @@ def simplify_abstract_arg_expr(expr: Expression) -> Expression:
 
 @functools.cache
 def simplify(expr: Expression) -> Expression:
-    expr = simplify_abstract_arg_expr(expr)
-
+    expr2 = simplify_abstract_arg_expr(expr)
+    expr = expr2
     if expr.is_undefined:
         return expr
 
@@ -690,6 +796,9 @@ def simplify(expr: Expression) -> Expression:
 
         if expr.exponent == Value(0) and expr.base != Value(0):
             return Value(1)
+
+        if isinstance(expr.base, Product):
+            return simplify(Product.from_args(*(Power.from_args(arg, expr.exponent) for arg in expr.base.args)))
 
         return expr
 
@@ -772,75 +881,19 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
             new_eq = simplify(expr.from_args(Difference.from_args(expr.lhs, expr.rhs), Value(0)))
             return reduce(new_eq, variable, depth=depth - 1)
 
-        if expr.lhs == variable:
-            return expr
+        for i, arg in enumerate(expr.lhs.args):
+            if variable in arg:
+                arg_sols = expr.lhs.inverse(i, expr.rhs)
 
-        if isinstance(expr.lhs, Sum):
-            subtract = []
+                u = UniqueVariable()
 
-            # noinspection PyUnresolvedReferences
-            for arg in expr.lhs.args:
-                if variable not in arg:
-                    subtract.append(arg)
+                var_sol = reduce(Equality(arg, u), variable, depth=depth-1)
 
-            if not subtract:
-                return expr
-
-            new_eq = expr.from_args(
-                Difference.from_args(expr.lhs, Sum.from_args(*subtract)),
-                Difference.from_args(expr.rhs, Sum.from_args(*subtract))
-            )
-
-            return reduce(new_eq, variable, depth=depth - 1)
-
-        elif isinstance(expr.lhs, Product):
-            if expr.rhs == Value(0):
-                # noinspection PyUnresolvedReferences
                 return simplify(LogicalOr.from_args(*(
-                    reduce(Equality(arg, Value(0)), variable, depth=depth - 1)
-                    for arg in expr.lhs.args
+                    substitute(var_sol, u, arg_sol) for arg_sol in arg_sols
                 )))
-            else:
-                divide = []
-
-                # noinspection PyUnresolvedReferences
-                for arg in expr.lhs.args:
-                    if variable not in arg:
-                        divide.append(arg)
-
-                if not divide:
-                    return expr
-
-                new_eq = expr.from_args(
-                    Quotient.from_args(expr.lhs, Product.from_args(*divide)),
-                    Quotient.from_args(expr.rhs, Product.from_args(*divide))
-                )
-
-                return reduce(new_eq, variable, depth=depth - 1)
-
-        elif isinstance(expr.lhs, Power):
-            # noinspection PyUnresolvedReferences
-            if variable in expr.lhs.base and variable not in expr.lhs.exponent:
-                # noinspection PyUnresolvedReferences
-                new_eq = expr.from_args(
-                    Power.from_args(expr.lhs, Quotient.from_args(Value(1), expr.lhs.exponent)),
-                    Power.from_args(expr.rhs, Quotient.from_args(Value(1), expr.lhs.exponent)),
-                )
-                # reduce(ThereExists.from_args(Variable("n"), ElementOf.from_args(Variable("n"), NaturalNumbers(),
-                # Equality.from_args(expr.lhs.exponent, Product.from_args(Number(2), expr.lhs.exponent)))),
-                # Variable("n"))
-                # TODO: Query if exponent is even
-
-                if isinstance(expr.lhs.exponent, Value):
-                    if expr.lhs.exponent.value % 2 == 0:
-                        new_eq = LogicalOr.from_args(
-                            new_eq,
-                            Equality.from_args(new_eq.lhs, Product.from_args(Value(-1), new_eq.rhs))
-                        )
-
-                return reduce(new_eq, variable, depth=depth - 1)
-
-            # TODO Log on both sides
+        else:
+            return expr
 
     elif isinstance(expr, LogicalOr):
         return simplify(LogicalOr.from_args(*(
