@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import functools
+import itertools
 import math
 import random
 import string
@@ -73,7 +74,7 @@ class Expression(abc.ABC):
             else:
                 return functools.partial(owner._from_args_instance, instance)
 
-    min_args: int = 0
+    min_args: int | None = 0
     max_args: int | None = None
     args: tuple[Expression]
 
@@ -91,10 +92,8 @@ class Expression(abc.ABC):
     def _from_args_class(cls, *args: Expression) -> Expression:
         assert cls.max_args != 0, "Use instance.from_args() instead."
 
-        assert len(args) != 0
-
         assert cls.max_args is None or len(args) <= cls.max_args
-        assert len(args) >= cls.min_args
+        assert cls.min_args is None or len(args) >= cls.min_args
 
         if cls.is_commutative and len(args) == 1:
             return args[0]
@@ -472,6 +471,8 @@ class Piecewise(Expression):
         for arg, cond in self.iter_args():
             if cond.eval():
                 return arg.eval()
+        
+        raise ExpressionEvaluationException
 
     def _from_args_instance(self, *args: Expression) -> Expression:
         assert len(args) % 2 == 0, "Piecewise expressions must have an even number of arguments."
@@ -813,6 +814,16 @@ def simplify(expr: Expression) -> Expression:
 
         if expr.argument == Value(1):
             return Value(0)
+
+    elif isinstance(expr, Piecewise):
+        expr = expr.from_args(*itertools.chain(
+            *filter(lambda arg_cond: arg_cond[1] != Boolean(False), expr.iter_args())
+        ))
+
+        assert isinstance(expr, Piecewise)
+
+        if len(expr.args) == 2 and expr.args[1] == Boolean(True):
+            return simplify(expr.args[0])
 
     return expr
 
