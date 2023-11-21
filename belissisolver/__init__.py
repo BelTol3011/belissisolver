@@ -6,7 +6,6 @@ import itertools
 import math
 import random
 import string
-import time
 import typing
 from collections import defaultdict
 
@@ -89,16 +88,17 @@ class Expression(abc.ABC):
     from_args = _FromArgsDesc()
 
     @classmethod
+    def _from_args(cls, *args: Expression) -> Expression:
+        return cls(*args)
+
+    @classmethod
     def _from_args_class(cls, *args: Expression) -> Expression:
         assert cls.max_args != 0, "Use instance.from_args() instead."
 
-        assert cls.max_args is None or len(args) <= cls.max_args
-        assert cls.min_args is None or len(args) >= cls.min_args
-
-        if cls.is_commutative and len(args) == 1:
+        if cls.is_commutative and len(args) == 1:  # TODO: Is this condition correct?
             return args[0]
         else:
-            return cls(*args)
+            return cls._from_args(*args)
 
     def _from_args_instance(self, *args: Expression) -> Expression:
         if self.max_args == 0:
@@ -106,12 +106,13 @@ class Expression(abc.ABC):
         else:
             return self._from_args_class(*args)
 
+    @abc.abstractmethod
     def to_str_human(self, parent: Expression | None = None):
-        return self.to_str_formal()
+        ...
 
+    @abc.abstractmethod
     def to_str_formal(self) -> str:
-        return f"{self.__class__.__name__}({', '.join(arg.to_str_formal() for arg in self.args)})"
-        return self.to_str_full(False)
+        ...
 
     def to_str_full(self, prune_no_args: bool = True) -> str:
         if prune_no_args and not self.args:
@@ -119,9 +120,8 @@ class Expression(abc.ABC):
         else:
             return f"{self.__class__.__name__}({', '.join(arg.to_str_full() for arg in self.args)})"
 
-    @abc.abstractmethod
     def eval(self) -> float:
-        ...
+        raise ExpressionEvaluationException(f"Can't evaluate {self}.")
 
     @classmethod
     def parse(cls, expr: str) -> "Expression":
@@ -142,9 +142,10 @@ class Expression(abc.ABC):
         expr = remove_top_level_parens(expr)
 
         types = (
-            Logarithm,
+            _Out, _NthArg,
+            Logarithm, Piecewise,
             _Differentiate, _Reduce, _Substitute,
-            LogicalOr, Equality,
+            LogicalOr, LogicalAnd, LogicalNot, LessThan, Equality,
             Sum, Difference,
             Product, Quotient,
             Power,
@@ -164,22 +165,30 @@ class Expression(abc.ABC):
                                "".join(f" - {error_msg}\n" for error_msg in errors))
 
     @property
-    def is_constant(self):
-        # TODO: Do I need this? Shouldn't isinstance(x, Value) be enough?
-        return all(arg.is_constant for arg in self.args)
+    def is_constant_value(self):
+        if not self.args:
+            return True
+        else:
+            return all(arg.is_constant_value for arg in self.args)
 
     @property
-    def is_undefined(self):
-        return False
+    def is_indeterminate(self) -> BooleanExpression:
+        return Boolean(False)
 
     def par_diff(self, i: int, var: Expression) -> Expression:
         raise NotImplementedError(f"Unknown partial derivative with respect to {i + 1}. argument of {self}.")
 
-    def inverse(self, i: int, result: Expression) -> typing.Collection[Expression]:
+    def inverted(self, i: int, result: Expression) -> typing.Collection[Expression]:
         raise NotImplementedError(f"Can't invert this expression using {i + 1}. argument of {self}.")
 
     def doit(self) -> Expression:
         return self.from_args(*(arg.doit() for arg in self.args))
+
+    def walk(self) -> typing.Iterable[Expression]:
+        yield self
+
+        for arg in self.args:
+            yield from arg.walk()
 
     def __contains__(self, item):
         return item == self or any(item in arg for arg in self.args)
@@ -207,7 +216,7 @@ class Expression(abc.ABC):
         return hash((self.__class__.__name__, tuple(self.args)))
 
 
-class BooleanExpression: pass
+class BooleanExpression(Expression): pass
 
 
 class Variable(Expression):
@@ -234,8 +243,11 @@ class Variable(Expression):
     def to_str_formal(self) -> str:
         return self.symbol
 
+    def to_str_human(self, parent: Expression | None = None):
+        return self.symbol
+
     @property
-    def is_constant(self):
+    def is_constant_value(self):
         return False
 
     def __contains__(self, item):
@@ -284,10 +296,6 @@ class Value(Expression):
 
     def to_str_formal(self) -> str:
         return f"{self.value}"
-
-    @property
-    def is_constant(self):
-        return True
 
     def to_str_human(self, parent: Expression | None = None):
         out = self.to_str_formal()
@@ -360,6 +368,9 @@ class _OperatorExpression(Expression, abc.ABC):
     def _to_str_human_parens(self, parent: Expression):
         return "(" + self._to_str_human_no_parens(self) + ")"
 
+    def to_str_human(self, parent: Expression | None = None):
+        return "(" + f" {self.operator} ".join([expr.to_str_human(self) for expr in self.args]) + ")"
+
 
 class Sum(_OperatorExpression):
     operator = "+"
@@ -391,7 +402,7 @@ class Sum(_OperatorExpression):
     def par_diff(self, i: int, var: Expression) -> Expression:
         return Value(1)
 
-    def inverse(self, i: int, result: Expression) -> tuple[Expression]:
+    def inverted(self, i: int, result: Expression) -> tuple[Expression]:
         return Difference.from_args(result, *(arg for j, arg in enumerate(self.args) if j != i)),
 
 
@@ -416,11 +427,11 @@ class Product(_OperatorExpression):
     def par_diff(self, i: int, var: Variable) -> Expression:
         return Product.from_args(*(arg for j, arg in enumerate(self.args) if j != i))
 
-    def inverse(self, i: int, result: Expression) -> tuple[Expression]:
+    def inverted(self, i: int, result: Expression) -> tuple[Expression]:
         return Quotient.from_args(result, *(arg for j, arg in enumerate(self.args) if j != i)),
 
 
-class QuotientsDifferencesMixin:
+class CantInit:
     def __init__(self, *args: Expression):
         raise ParsingException(
             f"{self.__class__.__name__}s are not meant to be instantiated. Use {self.__class__.__name__}.from_args() "
@@ -428,33 +439,39 @@ class QuotientsDifferencesMixin:
         )
 
 
-class Quotient(_OperatorExpression, QuotientsDifferencesMixin):
+class Quotient(_OperatorExpression, CantInit):
     operator = "/"
+    min_args = 2
 
     @classmethod
-    def from_args(cls, *args: Expression) -> Expression:
-        assert len(args) >= 2
-
+    def _from_args(cls, *args: Expression) -> Expression:
         return Product(args[0], *[Power(arg, Value(-1)) for arg in args[1:]])
 
     def eval(self) -> float:
         ...
 
 
-class Difference(_OperatorExpression):
+class Difference(_OperatorExpression, CantInit):
     operator = "-"
+    min_args = 2
 
     @classmethod
-    def from_args(cls, *args: Expression) -> Sum:
-        assert len(args) >= 2
-
+    def _from_args(cls, *args: Expression) -> Sum:
         return Sum(args[0], *[Product(arg, Value(-1)) for arg in args[1:]])
 
     def eval(self) -> float:
         ...
 
 
-class IsEven(Expression):
+class FunctionSyntaxExpression(Expression, abc.ABC):
+    def to_str_human(self, parent: Expression | None = None):
+        return f"{self.__class__.__name__}({', '.join(arg.to_str_human(self) for arg in self.args)})"
+
+    def to_str_formal(self) -> str:
+        return f"{self.__class__.__name__}({', '.join(arg.to_str_formal() for arg in self.args)})"
+
+
+class IsEven(FunctionSyntaxExpression):
     # don't have resolve yet, so can't prove this :(
 
     max_args = 1
@@ -463,7 +480,7 @@ class IsEven(Expression):
         return self.args[0].eval() % 2 == 0
 
 
-class Piecewise(Expression):
+class Piecewise(FunctionSyntaxExpression):
     is_commutative = False
     is_associative = False
 
@@ -471,13 +488,13 @@ class Piecewise(Expression):
         for arg, cond in self.iter_args():
             if cond.eval():
                 return arg.eval()
-        
+
         raise ExpressionEvaluationException
 
     def _from_args_instance(self, *args: Expression) -> Expression:
         assert len(args) % 2 == 0, "Piecewise expressions must have an even number of arguments."
 
-        return self._from_args_class(*args)
+        return super()._from_args_instance(*args)
 
     def iter_args(self) -> typing.Iterable[tuple[Expression, Expression]]:
         for i in range(0, len(self.args), 2):
@@ -493,8 +510,17 @@ class Piecewise(Expression):
             self.args[1::2]
         ))
 
-    def inverse(self, i: int, result: Expression) -> tuple[Expression]:
+    def inverted(self, i: int, result: Expression) -> tuple[Expression]:
         raise NotImplementedError("Can't yet invert a piecewise function, sorry. :(")
+
+    @property
+    def is_indeterminate(self):
+        # TODO: Maybe more strict?
+        out = LogicalOr.from_args(
+            LogicalAnd.from_args(*(arg.is_indeterminate for arg in self.args[::2])),
+            LogicalAnd.from_args(*(arg.is_indeterminate for arg in self.args[1::2]))
+        )
+        return out
 
 
 class Power(_OperatorExpression):
@@ -522,13 +548,19 @@ class Power(_OperatorExpression):
         return self.args[1]
 
     @property
-    def is_undefined(self):
-        if self.exponent == Value(0) and self.base == Value(0):
-            return True
-
-        # noinspection PyUnresolvedReferences
-        if isinstance(self.exponent, Value) and self.exponent.value < 0 and self.base == Value(0):
-            return True
+    def is_indeterminate(self) -> BooleanExpression:
+        # noinspection PyTypeChecker
+        return LogicalOr.from_args(
+            LogicalAnd.from_args(
+                Equality(self.exponent, Value(0)),
+                Equality(self.base, Value(0))
+            ),
+            LogicalAnd.from_args(
+                LessThan(self.exponent, Value(0)),
+                Equality(self.base, Value(0))
+            ),
+            # TODO: More cases
+        )
 
     def par_diff(self, i: int, var: Expression) -> Expression:
         if i == 0:
@@ -542,7 +574,7 @@ class Power(_OperatorExpression):
                 Logarithm.from_args(Constant.e, self.base)
             )
 
-    def inverse(self, i: int, result: Expression) -> tuple[Expression, ...]:
+    def inverted(self, i: int, result: Expression) -> tuple[Expression, ...]:
         if i == 0:
             # two solutions iff exponent is even
             sol = Power.from_args(result, Quotient.from_args(Value(1), self.exponent))
@@ -559,7 +591,7 @@ class Power(_OperatorExpression):
             return Logarithm.from_args(self.base, result),
 
 
-class Logarithm(Expression):
+class Logarithm(FunctionSyntaxExpression):
     is_commutative = False
     is_associative = False
 
@@ -580,17 +612,12 @@ class Logarithm(Expression):
         return self.args[1]
 
     @property
-    def is_undefined(self):
-        if self.argument == Value(0):
-            return True
-
-        # TODO: Query if argument is negative
-        if isinstance(self.argument, Value) and self.argument.value < 0:
-            return True
-
-        # noinspection PyUnresolvedReferences
-        if isinstance(self.argument, Value) and self.argument.value < 0 and self.base == Value(0):
-            return True
+    def is_indeterminate(self):
+        return LogicalOr.from_args(
+            Equality(self.argument, Value(0)),
+            LessThan(self.argument, Value(0))
+            # TODO: Check
+        )
 
     def par_diff(self, i: int, var: Variable) -> Expression:
         if i == 0:
@@ -604,7 +631,7 @@ class Logarithm(Expression):
                 )
             )
 
-    def inverse(self, i: int, result: Expression) -> tuple[Expression]:
+    def inverted(self, i: int, result: Expression) -> tuple[Expression]:
         if i == 0:
             raise NotImplementedError("Can't invert logarithm with respect to base.")
         else:
@@ -631,6 +658,25 @@ class Equality(_OperatorExpression, BooleanExpression):
         return self.args[1]
 
 
+class LessThan(_OperatorExpression, BooleanExpression):
+    operator = "<"
+    min_args = 2
+    max_args = 2
+    is_commutative = False
+    is_associative = False
+
+    def eval(self) -> float:
+        return self.args[0].eval() < self.args[1].eval()
+
+    @property
+    def lhs(self):
+        return self.args[0]
+
+    @property
+    def rhs(self):
+        return self.args[1]
+
+
 class LogicalOr(_OperatorExpression, BooleanExpression):
     operator = "∨"
     is_commutative = True
@@ -638,17 +684,20 @@ class LogicalOr(_OperatorExpression, BooleanExpression):
     is_idempotent = True
     unit_element = Boolean(False)
 
+    @classmethod
+    def _from_args(cls, *args: Expression) -> Expression:
+        if not args:
+            return Boolean(False)
+        else:
+            return super()._from_args(*args)
+
     def eval(self) -> float:
         return any(arg.eval() for arg in self.args)
 
-    @classmethod
-    def _from_args_class(cls, *args: Expression) -> Expression:
-        assert all(isinstance(arg, BooleanExpression) for arg in args), "LogicalOr only accepts BooleanExpressions."
 
-        return super(cls, cls)._from_args_class(*args)
+class LogicalAnd(_OperatorExpression, BooleanExpression, CantInit):
+    # TODO: Maybe implement just as combination of OR and NOT
 
-
-class LogicalAnd(_OperatorExpression, BooleanExpression):
     operator = "∧"
     is_commutative = True
     is_associative = True
@@ -657,6 +706,31 @@ class LogicalAnd(_OperatorExpression, BooleanExpression):
 
     def eval(self) -> float:
         return all(arg.eval() for arg in self.args)
+
+    @classmethod
+    def _from_args(cls, *args: Expression) -> Expression:
+        return LogicalNot.from_args(LogicalOr.from_args(*(
+            LogicalNot.from_args(arg) for arg in args
+        )))
+
+
+class LogicalNot(FunctionSyntaxExpression, BooleanExpression):
+    min_args = 1
+    max_args = 1
+
+    def eval(self) -> float:
+        return not self.args[0].eval()
+
+    def to_str_formal(self) -> str:
+        return f"¬({self.args[0].to_str_formal()})"
+
+    def to_str_human(self, parent: Expression | None = None) -> str:
+        return f"¬({self.args[0].to_str_human(self)})"
+
+    def inverted(self, i: int, result: Expression) -> typing.Collection[Expression]:
+        assert i == 0
+
+        return LogicalNot.from_args(result),
 
 
 def simplify_idempotent(expr: Expression) -> Expression:
@@ -695,7 +769,7 @@ def simplify_commutative(expr: Expression) -> Expression:
         if arg != expr.unit_element:
             if isinstance(arg, Value):
                 numbers.append(arg)
-            elif arg.is_constant:
+            elif arg.is_constant_value:
                 constants.append(arg)
             else:
                 args.append(arg)
@@ -712,13 +786,14 @@ def simplify_commutative(expr: Expression) -> Expression:
 
 
 def simplify_abstract_arg_expr(expr: Expression) -> Expression:
-    for arg in expr.args:
-        if arg.is_undefined:
-            return arg
-
     expr = expr.from_args(*[simplify(arg) for arg in expr.args])
 
-    if all(arg.is_constant for arg in expr.args) and not isinstance(expr, Constant):
+    for arg in expr.args:
+        if resolve(arg.is_indeterminate) == Boolean(True):
+            pass
+            # return arg
+
+    if all(arg.is_constant_value for arg in expr.args) and not isinstance(expr, Constant):
         try:
             return Value(expr.eval())
         except ExpressionEvaluationException:
@@ -733,9 +808,9 @@ def simplify_abstract_arg_expr(expr: Expression) -> Expression:
 
 @functools.cache
 def simplify(expr: Expression) -> Expression:
-    expr2 = simplify_abstract_arg_expr(expr)
-    expr = expr2
-    if expr.is_undefined:
+    expr = simplify_abstract_arg_expr(expr)
+
+    if resolve(expr.is_indeterminate) == Boolean(True):
         return expr
 
     if isinstance(expr, Sum):
@@ -816,20 +891,27 @@ def simplify(expr: Expression) -> Expression:
             return Value(0)
 
     elif isinstance(expr, Piecewise):
-        expr = expr.from_args(*itertools.chain(
-            *filter(lambda arg_cond: arg_cond[1] != Boolean(False), expr.iter_args())
-        ))
-
-        assert isinstance(expr, Piecewise)
+        if Boolean(False) in expr.args[1::2]:
+            return simplify(expr.from_args(*itertools.chain(
+                *filter(lambda arg_cond: arg_cond[1] != Boolean(False), expr.iter_args())
+            )))
 
         if len(expr.args) == 2 and expr.args[1] == Boolean(True):
             return simplify(expr.args[0])
+
+    elif isinstance(expr, LogicalOr):
+        if Boolean(True) in expr.args:
+            return Boolean(True)
+
+    elif isinstance(expr, LogicalNot):
+        if isinstance(expr.args[0], LogicalNot):
+            return expr.args[0].args[0]
 
     return expr
 
 
 def differentiate(expr: Expression, var: Variable) -> Expression:
-    if expr.is_constant:
+    if expr.is_constant_value:
         return Value(0)
 
     if isinstance(expr, Variable):
@@ -864,46 +946,71 @@ def create_func(name: str, function: typing.Callable[[Expression, ...], Expressi
         raise NotImplementedError(f"Can't evaluate {self}.")
 
     # noinspection PyTypeChecker
-    return type(name, (Expression,), {
+    return type(name, (FunctionSyntaxExpression,), {
         "doit": doit,
         "eval": raise_not_implemented
     })
 
 
-def substitute(expr: Expression, key: Expression, to: Expression):
-    if expr == key:
-        return to
+def substitute(expr: Expression, subst_dict: dict[Expression, Expression]):
+    if expr in subst_dict:
+        return subst_dict[expr]
 
     args = []
 
     for arg in expr.args:
-        args.append(substitute(arg, key, to))
+        args.append(substitute(arg, subst_dict))
 
     return expr.from_args(*args)
 
 
-def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
+# def substitute2(expr: Expression, func: typing.Callable[[Expression], Expression | None]):
+#     if out := func(expr) is not None:
+#         return out
+#
+#     args = []
+#
+#     for arg in expr.args:
+#         args.append(substitute2(arg, func))
+#
+#     return expr.from_args(*args)
+
+
+def reduce(expr: Expression, variable: Expression, depth: int = 10) -> Expression:
     if depth <= 0:
         return expr
 
     expr = simplify(expr)
 
+    if not isinstance(variable, Variable):
+        vars_in_expr = set(filter(lambda x: isinstance(x, Variable), expr.walk()))
+
+        vars_sol = {var: reduce(expr, var, depth=depth - 1) for var in vars_in_expr}
+
+        out = substitute(variable, {var: sol.rhs for var, sol in vars_sol.items()})
+
+        return simplify(Equality.from_args(variable, out))
+
     if isinstance(expr, Equality):
         if variable in expr.rhs:
-            new_eq = simplify(expr.from_args(Difference.from_args(expr.lhs, expr.rhs), Value(0)))
-            # new_eq = simplify(expr.from_args(Quotient.from_args(expr.lhs, expr.rhs), Value(1)))
-            return reduce(new_eq, variable, depth=depth - 1)
+            new_eq1 = simplify(expr.from_args(Difference.from_args(expr.lhs, expr.rhs), Value(0)))
+            # new_eq2 = simplify(expr.from_args(Quotient.from_args(expr.lhs, expr.rhs), Value(1)))
+            new_eq2 = Value(False)
+            return reduce(LogicalOr.from_args(new_eq1, new_eq2), variable, depth=depth - 1)
 
         out = []
         for i, arg in enumerate(expr.lhs.args):
             if variable in arg:
-                arg_sols = expr.lhs.inverse(i, expr.rhs)
+                arg_sols = expr.lhs.inverted(i, expr.rhs)
 
                 u = UniqueVariable()
 
                 var_sol = reduce(Equality(arg, u), variable, depth=depth - 1)
 
-                out += (substitute(var_sol, u, arg_sol) for arg_sol in arg_sols)
+                out += (
+                    substitute(var_sol, {u: arg_sol})
+                    for arg_sol in arg_sols
+                )
 
         if not out:
             return expr
@@ -915,15 +1022,48 @@ def reduce(expr: Expression, variable: Variable, depth: int = 10) -> Expression:
             reduce(arg, variable, depth=depth - 1) for arg in expr.args
         )))
 
+    elif isinstance(expr, LogicalNot):
+        return simplify(LogicalNot(reduce(expr.args[0], variable, depth=depth - 1)))
+
     elif isinstance(expr, Value):
         return expr
 
     return expr
 
 
+def resolve(expr: Expression, *assumptions: Expression) -> Expression:
+    # TODO: Implement
+    if isinstance(expr, Value):
+        return expr
+
+    return simplify(expr)
+
+
+def _subst(expr: Expression, *args: Expression):
+    return substitute(expr, dict(zip(args[::2], args[1::2])))
+
+
+class _Out(FunctionSyntaxExpression):
+    min_args = 1
+    max_args = 1
+
+
+class _NthArg(FunctionSyntaxExpression):
+    min_args = 2
+    max_args = 2
+
+    def doit(self) -> Expression:
+        try:
+            return self.args[0].args[int(self.args[1].eval())]
+        except (ExpressionEvaluationException, ValueError, IndexError):
+            return self
+
+
 _Differentiate = create_func("D", differentiate)
 _Reduce = create_func("Reduce", reduce)
-_Substitute = create_func("Subst", substitute)
+_Substitute = create_func("Subst", _subst)
+_NthArg = create_func("NthArg", _NthArg.from_args)
+_Out = create_func("Out", _Out.from_args)
 
 
 def gen_fuzz(length=20):
@@ -970,109 +1110,9 @@ def generate_random_expression(max_levels: 5) -> Expression:
     return expr_type.from_args(*args)
 
 
-def main():
-    while 1:
-        txt = input("f(x) = ")
-
-        # (((hl * (i ^ -1)) + (-1 * 98t)) + ((S * (O * (Ft ^ -1))) + (-1 * (h * (QB ^ -1)))))
-        # (A + ((((EMOH ^ 1.0) * (RC ^ -1)) * d) + (-1 * 6.0) + (-1 * lD) + (-1 * d)))
-
-        try:
-            if txt == "":
-                expr = generate_random_expression(4)
-            else:
-                expr = Expression.from_str(txt)
-        except ParsingException as e:
-            print(f"f(x) = ? ({e})")
-            continue
-
-        print(f"f(x) = {expr}")
-        print(f"f(x) = {expr.to_str_full()}")
-
-        t1 = time.perf_counter()
-        simple = simplify(expr)
-        dt = time.perf_counter() - t1
-
-        if simple != expr:
-            print(f"f(x) = {simple}")
-
-        if simple.is_undefined:
-            print("// undefined")
-
-        print(f"// simplification took {dt:.4f}s")
-
-        try:
-            evaluated = simple.eval()
-
-            if Value(evaluated) != simple:
-                print(f"f(x) ≈ {evaluated}")
-        except ExpressionEvaluationException as e:
-            print(f"f(x) ≈ ? ({e})")
-
-        fx1 = simplify(substitute(simple, Variable("x"), Value(1)))
-
-        print(f"f(1) = {fx1}")
-
-        try:
-            fx1e = fx1.eval()
-
-            print(f"f(1) ≈ {fx1e}")
-        except ExpressionEvaluationException as e:
-            print(f"f(1) ≈ ? ({e})")
-
-        try:
-            t4 = time.perf_counter()
-            red = reduce(Equality(Variable("f(x)"), simple), Variable("x"))
-            dt4 = time.perf_counter() - t4
-
-            print(f" => {red}")
-            print(f"// reduction of f took {dt4:.4f}s")
-        except NotImplementedError as e:
-            print(f" => ? ({e})")
-
-        try:
-            t4 = time.perf_counter()
-            red = reduce(Equality(Value(0), simple), Variable("x"))
-            dt4 = time.perf_counter() - t4
-
-            print(f" => f(x)=0 <=> {red}")
-            print(f"// reduction of f(x)=0 took {dt4:.4f}s")
-        except NotImplementedError as e:
-            print(f" => ? ({e})")
-
-        try:
-            t2 = time.perf_counter()
-            diff = differentiate(simple, Variable("x"))
-            dt2 = time.perf_counter() - t2
-
-            print(f"f'(x) = {diff}")
-            print(f"// differentiation took {dt2:.4f}s")
-
-            t3 = time.perf_counter()
-            simple_diff = simplify(diff)
-            dt3 = time.perf_counter() - t3
-            print(f"f'(x) = {simple_diff}")
-
-            print(f"// simplification of f' took {dt3:.4f}s")
-        except NotImplementedError as e:
-            print(f"f'(x) = ? ({e})")
-        else:
-            try:
-                t5 = time.perf_counter()
-                red = reduce(Equality(Value(0), simple_diff), Variable("x"))
-                dt5 = time.perf_counter() - t5
-
-                print(f" => f'(x) = 0 <=> {red}")
-                print(f"// reduction of f'=0 took {dt5:.4f}s")
-            except NotImplementedError as e:
-                print(f" => ? ({e})")
-
-        print(f"// {simplify.cache_info()}")
-        print()
-
-
 def main2():
     i = 0
+    cells: dict[_Out, Expression] = {}
     while 1:
         cell_num = str(i)
 
@@ -1085,8 +1125,7 @@ def main2():
             print(f" -> {e}")
             continue
 
-        expr = substitute(expr, Variable("e"), Constant.e)
-        expr = substitute(expr, Variable("pi"), Constant.pi)
+        expr = substitute(expr, {Variable("e"): Constant.e, Variable("pi"): Constant.pi, **cells})
 
         expr = expr.doit()
 
@@ -1097,8 +1136,10 @@ def main2():
 
         # print(f" {' ' * len(cell_num)}>  {simple}")
         print(f" {' ' * len(cell_num)}>  {simple.to_str_human()}")
-        if simple.is_undefined:
+        if resolve(simple.is_indeterminate) == Boolean(True):
             print(f" {' ' * len(cell_num)}!  Expression is undefined.")
+
+        cells[_Out(Value(i))] = simple
 
         print()
         i += 1
