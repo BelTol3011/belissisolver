@@ -882,6 +882,8 @@ def simplify(expr: Expression) -> Expression:
     elif isinstance(expr, Equality):
         if expr.lhs == expr.rhs:
             return Boolean(True)
+        if expr.lhs.is_indeterminate or expr.rhs.is_indeterminate:
+            return Boolean(False)
 
     elif isinstance(expr, Logarithm):
         if expr.base == expr.argument:
