@@ -788,10 +788,10 @@ def simplify_commutative(expr: Expression) -> Expression:
 def simplify_abstract_arg_expr(expr: Expression) -> Expression:
     expr = expr.from_args(*[simplify(arg) for arg in expr.args])
 
-    for arg in expr.args:
-        if resolve(arg.is_indeterminate) == Boolean(True):
-            pass
-            # return arg
+    if isinstance(expr, (Sum, Product, Power)):
+        for arg in expr.args:
+            if resolve(arg.is_indeterminate) == Boolean(True):
+                return arg
 
     if all(arg.is_constant_value for arg in expr.args) and not isinstance(expr, Constant):
         try:
@@ -808,10 +808,10 @@ def simplify_abstract_arg_expr(expr: Expression) -> Expression:
 
 @functools.cache
 def simplify(expr: Expression) -> Expression:
-    expr = simplify_abstract_arg_expr(expr)
-
     if resolve(expr.is_indeterminate) == Boolean(True):
         return expr
+
+    expr = simplify_abstract_arg_expr(expr)
 
     if isinstance(expr, Sum):
         # combine factors
@@ -882,7 +882,7 @@ def simplify(expr: Expression) -> Expression:
     elif isinstance(expr, Equality):
         if expr.lhs == expr.rhs:
             return Boolean(True)
-        if expr.lhs.is_indeterminate or expr.rhs.is_indeterminate:
+        if simplify(LogicalOr.from_args(expr.lhs.is_indeterminate, expr.rhs.is_indeterminate)) == Boolean(True):
             return Boolean(False)
 
     elif isinstance(expr, Logarithm):
@@ -1120,6 +1120,8 @@ def main2():
 
         expr = input(f" [{cell_num}] ")
         if not expr.strip():
+            # expr = generate_random_expression(3).to_str_formal()
+            # expr = f"Reduce(D(D({expr}, x), x)=0, x)"
             continue
         try:
             expr = Expression.from_str(expr)
